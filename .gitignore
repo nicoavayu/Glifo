@@ -1,0 +1,8 @@
+node_modules
+plugin/dist
+server/dist
+.DS_Store
+Img/
+
+# Local export presets
+plugin/presets/*.epr

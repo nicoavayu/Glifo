@@ -1,0 +1,13 @@
+{
+  "name": "plugin-subs",
+  "private": true,
+  "version": "0.0.1",
+  "workspaces": [
+    "plugin",
+    "server"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace plugin && npm run build --workspace server",
+    "dev:server": "npm run dev --workspace server"
+  }
+}
