@@ -7,6 +7,7 @@ import {
   exportActiveSequenceInOutToWav,
   isAudioExportError,
 } from "../premiere/audioExport";
+import type { ExportedWav } from "../premiere/audioExport";
 import type { TranscribeResponse } from "../types/transcribe";
 
 interface PanelElements {
@@ -17,6 +18,10 @@ interface ResultElements {
   emptyState: HTMLDivElement;
   metadataSection: HTMLElement;
   metadataList: HTMLDivElement;
+  segmentsSection: HTMLElement;
+  segmentsPreview: HTMLPreElement;
+  captionsSection: HTMLElement;
+  captionsPreview: HTMLPreElement;
   textSection: HTMLElement;
   fullTextPreview: HTMLPreElement;
   copyButton: HTMLButtonElement;
@@ -54,6 +59,16 @@ export function createPanelController(elements: PanelElements) {
             <section id="resultMetadataSection" class="panel__resultSection" hidden>
               <h2 class="panel__sectionTitle">Metadata</h2>
               <div id="resultMetadataList" class="panel__metadataList"></div>
+            </section>
+
+            <section id="resultSegmentsSection" class="panel__resultSection" hidden>
+              <h2 class="panel__sectionTitle">Segmentos STT originales</h2>
+              <pre id="segmentsPreview" class="panel__segmentsList"></pre>
+            </section>
+
+            <section id="resultCaptionsSection" class="panel__resultSection" hidden>
+              <h2 class="panel__sectionTitle">Caption segments</h2>
+              <pre id="captionsPreview" class="panel__segmentsList"></pre>
             </section>
 
             <section id="resultTextSection" class="panel__resultSection" hidden>
@@ -180,6 +195,8 @@ export function createPanelController(elements: PanelElements) {
           model: transcript.model,
           fullTextLength: transcript.fullText.length,
           segments: transcript.segments.length,
+          words: transcript.words.length,
+          captionSegments: transcript.captionSegments.length,
         });
       } catch (error) {
         const formatted = formatTranscriptionError(error);
@@ -227,7 +244,7 @@ export function createPanelController(elements: PanelElements) {
         try {
           transcript = await requestTranscript({
             mediaPath: exportedWav.mediaPath,
-            durationMs: null,
+            durationMs: exportedWav.durationMs,
           });
         } finally {
           await cleanupExportedWavSafely(cleanupExportedWav, exportedWavFilename);
@@ -236,13 +253,15 @@ export function createPanelController(elements: PanelElements) {
 
         latestFullText = transcript.fullText;
         statusLabel.textContent = "Estado: transcripción lista";
-        renderTranscript(resultElements, hideTemporaryWavPath(transcript));
+        renderTranscript(resultElements, hideTemporaryWavPath(transcript), exportedWav);
 
         console.info("[GLIFO] transcribe-range:ok", {
           provider: transcript.provider,
           model: transcript.model,
           fullTextLength: transcript.fullText.length,
           segments: transcript.segments.length,
+          words: transcript.words.length,
+          captionSegments: transcript.captionSegments.length,
         });
       } catch (error) {
         const formatted = formatRangeTranscriptionError(error);
@@ -299,6 +318,10 @@ function getResultElements(root: HTMLElement): ResultElements | null {
   const emptyState = root.querySelector<HTMLDivElement>("#resultEmpty");
   const metadataSection = root.querySelector<HTMLElement>("#resultMetadataSection");
   const metadataList = root.querySelector<HTMLDivElement>("#resultMetadataList");
+  const segmentsSection = root.querySelector<HTMLElement>("#resultSegmentsSection");
+  const segmentsPreview = root.querySelector<HTMLPreElement>("#segmentsPreview");
+  const captionsSection = root.querySelector<HTMLElement>("#resultCaptionsSection");
+  const captionsPreview = root.querySelector<HTMLPreElement>("#captionsPreview");
   const textSection = root.querySelector<HTMLElement>("#resultTextSection");
   const fullTextPreview = root.querySelector<HTMLPreElement>("#fullTextPreview");
   const copyButton = root.querySelector<HTMLButtonElement>("#copyTextButton");
@@ -308,6 +331,10 @@ function getResultElements(root: HTMLElement): ResultElements | null {
     !emptyState ||
     !metadataSection ||
     !metadataList ||
+    !segmentsSection ||
+    !segmentsPreview ||
+    !captionsSection ||
+    !captionsPreview ||
     !textSection ||
     !fullTextPreview ||
     !copyButton ||
@@ -320,6 +347,10 @@ function getResultElements(root: HTMLElement): ResultElements | null {
     emptyState,
     metadataSection,
     metadataList,
+    segmentsSection,
+    segmentsPreview,
+    captionsSection,
+    captionsPreview,
     textSection,
     fullTextPreview,
     copyButton,
@@ -334,8 +365,12 @@ function renderEmptyResult(elements: ResultElements): void {
     "Formatos soportados: WAV, MP4, M4A, MP3, MPEG, MPGA, WEBM, FLAC, OGG.",
   ].join("\n");
   elements.metadataSection.hidden = true;
+  elements.segmentsSection.hidden = true;
+  elements.captionsSection.hidden = true;
   elements.textSection.hidden = true;
   elements.metadataList.textContent = "";
+  elements.segmentsPreview.textContent = "";
+  elements.captionsPreview.textContent = "";
   elements.fullTextPreview.textContent = "";
   elements.copyButton.disabled = true;
   setCopyFeedback(elements, "", "neutral");
@@ -345,18 +380,33 @@ function renderPendingResult(elements: ResultElements, message: string): void {
   elements.emptyState.hidden = false;
   elements.emptyState.textContent = message;
   elements.metadataSection.hidden = true;
+  elements.segmentsSection.hidden = true;
+  elements.captionsSection.hidden = true;
   elements.textSection.hidden = true;
   elements.metadataList.textContent = "";
+  elements.segmentsPreview.textContent = "";
+  elements.captionsPreview.textContent = "";
   elements.fullTextPreview.textContent = "";
   elements.copyButton.disabled = true;
   setCopyFeedback(elements, "", "neutral");
 }
 
-function renderTranscript(elements: ResultElements, response: TranscribeResponse): void {
+function renderTranscript(
+  elements: ResultElements,
+  response: TranscribeResponse,
+  rangeDebug?: ExportedWav,
+): void {
   elements.emptyState.hidden = true;
   elements.metadataSection.hidden = false;
+  elements.segmentsSection.hidden = false;
+  elements.captionsSection.hidden = false;
   elements.textSection.hidden = false;
   elements.metadataList.textContent = "";
+  elements.segmentsPreview.textContent = formatSegmentsText(response.segments);
+  elements.captionsPreview.textContent = formatCaptionSegmentsText(
+    response.captionSegments,
+    rangeDebug ? { sequenceInMs: rangeDebug.sequenceInMs } : undefined,
+  );
   elements.fullTextPreview.textContent = response.fullText || "(sin texto)";
   elements.copyButton.disabled = response.fullText.length === 0;
   setCopyFeedback(elements, "", "neutral");
@@ -367,17 +417,99 @@ function renderTranscript(elements: ResultElements, response: TranscribeResponse
   renderMetadataRow(elements.metadataList, "filename", response.metadata.filename);
   renderMetadataRow(elements.metadataList, "mediaPath", response.metadata.mediaPath);
   renderMetadataRow(elements.metadataList, "segments", String(response.segments.length));
+  renderMetadataRow(elements.metadataList, "words", String(response.words.length));
+  renderMetadataRow(elements.metadataList, "captionSegments", String(response.captionSegments.length));
+
+  if (rangeDebug) {
+    renderMetadataRow(
+      elements.metadataList,
+      "In real detectado",
+      formatDebugMs(rangeDebug.sequenceInMs),
+    );
+    renderMetadataRow(
+      elements.metadataList,
+      "Out real detectado",
+      formatDebugMs(rangeDebug.sequenceOutMs),
+    );
+    renderMetadataRow(
+      elements.metadataList,
+      "Duración detectada",
+      formatDebugMs(rangeDebug.durationMs),
+    );
+  }
 }
 
 function renderErrorResult(elements: ResultElements, message: string): void {
   elements.emptyState.hidden = false;
   elements.emptyState.textContent = message;
   elements.metadataSection.hidden = true;
+  elements.segmentsSection.hidden = true;
+  elements.captionsSection.hidden = true;
   elements.textSection.hidden = true;
   elements.metadataList.textContent = "";
+  elements.segmentsPreview.textContent = "";
+  elements.captionsPreview.textContent = "";
   elements.fullTextPreview.textContent = "";
   elements.copyButton.disabled = true;
   setCopyFeedback(elements, "", "neutral");
+}
+
+export function formatSegmentsText(
+  segments: TranscribeResponse["segments"],
+): string {
+  if (segments.length === 0) {
+    return "Sin segmentos disponibles";
+  }
+
+  return segments
+    .map((segment) => {
+      return `[${formatMs(segment.startMs)} - ${formatMs(segment.endMs)}] ${segment.text}`;
+    })
+    .join("\n");
+}
+
+export function formatCaptionSegmentsText(
+  captionSegments: TranscribeResponse["captionSegments"],
+  timeline?: { sequenceInMs: number },
+): string {
+  if (captionSegments.length === 0) {
+    return "Sin caption segments disponibles";
+  }
+
+  return captionSegments
+    .map((segment) => {
+      const relativeLine = `[${formatMs(segment.startMs)} - ${formatMs(segment.endMs)}] ${segment.text}`;
+      if (!timeline) {
+        return relativeLine;
+      }
+
+      const timelineStartMs = timeline.sequenceInMs + segment.startMs;
+      const timelineEndMs = timeline.sequenceInMs + segment.endMs;
+      return [
+        relativeLine,
+        `Timeline: [${formatMs(timelineStartMs)} - ${formatMs(timelineEndMs)}]`,
+      ].join("\n");
+    })
+    .join("\n");
+}
+
+export function formatMs(ms: number): string {
+  const totalMs = Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0;
+  const minutes = Math.floor(totalMs / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+
+  return [
+    String(minutes).padStart(2, "0"),
+    ":",
+    String(seconds).padStart(2, "0"),
+    ".",
+    String(milliseconds).padStart(3, "0"),
+  ].join("");
+}
+
+function formatDebugMs(ms: number): string {
+  return `${formatMs(ms)} (${Math.round(ms)} ms)`;
 }
 
 function renderMetadataRow(container: HTMLElement, label: string, value: string): void {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AudioExportError,
   exportActiveSequenceInOutToWav,
+  readPremiereTimeMilliseconds,
   resolveActivePremiereContextForAudioExport,
   validateInOutRange,
 } from "../src/premiere/audioExport";
@@ -26,8 +27,11 @@ afterEach(() => {
 
 describe("audio export pure helpers", () => {
   it("acepta un rango In/Out con out mayor que in", () => {
-    expect(validateInOutRange({ seconds: 12.5 }, { seconds: 18 })).toEqual({
+    expect(validateInOutRange({ seconds: 12.5 }, { seconds: 18 })).toMatchObject({
       valid: true,
+      sequenceInMs: 12500,
+      sequenceOutMs: 18000,
+      durationMs: 5500,
       inSeconds: 12.5,
       outSeconds: 18,
       endSeconds: null,
@@ -41,12 +45,45 @@ describe("audio export pure helpers", () => {
   });
 
   it("rechaza el rango completo de secuencia para evitar export accidental", () => {
-    expect(validateInOutRange({ seconds: 0 }, { seconds: 60 }, { seconds: 60 })).toEqual({
+    expect(validateInOutRange({ seconds: 0 }, { seconds: 60 }, { seconds: 60 })).toMatchObject({
       valid: false,
+      sequenceInMs: 0,
+      sequenceOutMs: 60000,
+      durationMs: 60000,
+      sequenceEndMs: 60000,
       inSeconds: 0,
       outSeconds: 60,
       endSeconds: 60,
     });
+  });
+
+  it("convierte ticks de Premiere a milisegundos", () => {
+    expect(readPremiereTimeMilliseconds({
+      ticks: String(221 * 254_016_000_000),
+    })).toBe(221000);
+  });
+
+  it("convierte value/timebase a milisegundos", () => {
+    expect(readPremiereTimeMilliseconds({
+      value: 232 * 1000,
+      timebase: 1000,
+    })).toBe(232000);
+  });
+
+  it("convierte frames si hay frameRate disponible", () => {
+    expect(readPremiereTimeMilliseconds({
+      frames: 330,
+      frameRate: 30,
+    })).toBe(11000);
+  });
+
+  it("convierte strings de reloj a milisegundos", () => {
+    expect(readPremiereTimeMilliseconds("00:03:41.000")).toBe(221000);
+    expect(readPremiereTimeMilliseconds("03:52.000")).toBe(232000);
+    expect(readPremiereTimeMilliseconds({
+      frameRate: 25,
+      toString: () => "00:03:41:00",
+    })).toBe(221000);
   });
 });
 
@@ -177,6 +214,9 @@ describe("audio export EncoderManager wait flow", () => {
     expect(exported).toMatchObject({
       mediaPath: `/tmp/${runtime.createdFilename}`,
       filename: runtime.createdFilename,
+      sequenceInMs: 1000,
+      sequenceOutMs: 4000,
+      durationMs: 3000,
     });
     expect(typeof exported.cleanup).toBe("function");
 

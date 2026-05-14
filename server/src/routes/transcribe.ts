@@ -117,6 +117,8 @@ transcribeRouter.post("/transcribe", async (req, res) => {
       model: sttResult.model,
       fullTextLength: sttResult.fullText.length,
       segments: sttResult.segments.length,
+      words: sttResult.words.length,
+      captionSegments: sttResult.captionSegments.length,
     });
 
     res.json({
@@ -125,6 +127,8 @@ transcribeRouter.post("/transcribe", async (req, res) => {
       model: sttResult.model,
       fullText: sttResult.fullText,
       segments: sttResult.segments,
+      words: sttResult.words,
+      captionSegments: sttResult.captionSegments,
       metadata: {
         mediaPath: audioSource.audioPath,
         filename: audioSource.filename,

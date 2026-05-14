@@ -15,6 +15,20 @@ export interface TranscribeSegment {
   speaker?: string | null;
 }
 
+export interface SttWord {
+  startMs: number;
+  endMs: number;
+  word: string;
+}
+
+export interface CaptionSegment {
+  startMs: number;
+  endMs: number;
+  text: string;
+  timelineStartMs?: number;
+  timelineEndMs?: number;
+}
+
 export interface TranscribeMetadata {
   mediaPath: string;
   filename: string;
@@ -27,5 +41,7 @@ export interface TranscribeResponse {
   model: string;
   fullText: string;
   segments: TranscribeSegment[];
+  words: SttWord[];
+  captionSegments: CaptionSegment[];
   metadata: TranscribeMetadata;
 }

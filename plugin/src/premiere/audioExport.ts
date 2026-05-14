@@ -15,14 +15,53 @@ export type AudioExportErrorCode =
 export interface ExportedWav {
   mediaPath: string;
   filename: string;
+  sequenceInMs: number;
+  sequenceOutMs: number;
+  durationMs: number;
+  rawInPointDebug: PremiereTimePointDebug;
+  rawOutPointDebug: PremiereTimePointDebug;
   cleanup?: () => Promise<void>;
+}
+
+export interface PremiereTimeDebugProperty {
+  exists: boolean;
+  value: string | null;
+  valueKind: string;
+  numericValue: number | null;
+}
+
+export interface PremiereTimeConversionDebug {
+  milliseconds: number;
+  source: string;
+}
+
+export interface PremiereTimePointDebug {
+  valueKind: string;
+  enumerableKeys: string[];
+  propertyNames: string[];
+  seconds: PremiereTimeDebugProperty;
+  ticks: PremiereTimeDebugProperty;
+  timebase: PremiereTimeDebugProperty;
+  value: PremiereTimeDebugProperty;
+  frames: PremiereTimeDebugProperty;
+  frameRate: PremiereTimeDebugProperty;
+  fps: PremiereTimeDebugProperty;
+  toStringValue: string | null;
+  conversion: PremiereTimeConversionDebug | null;
 }
 
 export interface InOutRangeValidation {
   valid: boolean;
+  sequenceInMs: number | null;
+  sequenceOutMs: number | null;
+  durationMs: number | null;
+  sequenceEndMs: number | null;
   inSeconds: number | null;
   outSeconds: number | null;
   endSeconds: number | null;
+  rawInPointDebug: PremiereTimePointDebug;
+  rawOutPointDebug: PremiereTimePointDebug;
+  rawEndPointDebug: PremiereTimePointDebug;
 }
 
 export class AudioExportError extends Error {
@@ -141,6 +180,7 @@ const RENDER_TIMEOUT_MS = 60 * 1000;
 const RENDER_FILE_POLL_MS = 2 * 1000;
 const FILE_READY_TIMEOUT_MS = 10 * 1000;
 const FILE_READY_POLL_MS = 250;
+const PREMIERE_TICKS_PER_SECOND = 254_016_000_000;
 
 export function isAudioExportError(value: unknown): value is AudioExportError {
   return value instanceof AudioExportError;
@@ -152,7 +192,7 @@ export async function exportActiveSequenceInOutToWav(): Promise<ExportedWav> {
   const localFileSystem = loadLocalFileSystem(requireFn);
 
   const { activeSequence } = await resolveActivePremiereContextForAudioExport(premiereModule);
-  await assertValidInOutRange(activeSequence);
+  const inOutRange = await assertValidInOutRange(activeSequence);
 
   const presetPath = await resolveWavPresetPath(localFileSystem);
   const output = await createTemporaryWavFile(localFileSystem);
@@ -247,6 +287,11 @@ export async function exportActiveSequenceInOutToWav(): Promise<ExportedWav> {
   return {
     mediaPath: output.mediaPath,
     filename: output.filename,
+    sequenceInMs: inOutRange.sequenceInMs,
+    sequenceOutMs: inOutRange.sequenceOutMs,
+    durationMs: inOutRange.durationMs,
+    rawInPointDebug: inOutRange.rawInPointDebug,
+    rawOutPointDebug: inOutRange.rawOutPointDebug,
     cleanup: createTemporaryWavCleanup({
       requireFn,
       fileEntry: output.fileEntry,
@@ -261,24 +306,41 @@ export function validateInOutRange(
   outPoint: unknown,
   endPoint?: unknown,
 ): InOutRangeValidation {
-  const inSeconds = readTickSeconds(inPoint);
-  const outSeconds = readTickSeconds(outPoint);
-  const endSeconds = readTickSeconds(endPoint);
+  const rawInPointDebug = createPremiereTimePointDebug(inPoint);
+  const rawOutPointDebug = createPremiereTimePointDebug(outPoint);
+  const rawEndPointDebug = createPremiereTimePointDebug(endPoint);
+  const sequenceInMs = rawInPointDebug.conversion?.milliseconds ?? null;
+  const sequenceOutMs = rawOutPointDebug.conversion?.milliseconds ?? null;
+  const sequenceEndMs = rawEndPointDebug.conversion?.milliseconds ?? null;
+  const durationMs =
+    sequenceInMs !== null && sequenceOutMs !== null
+      ? sequenceOutMs - sequenceInMs
+      : null;
+  const inSeconds = msToSeconds(sequenceInMs);
+  const outSeconds = msToSeconds(sequenceOutMs);
+  const endSeconds = msToSeconds(sequenceEndMs);
   const hasPositiveRange =
-    inSeconds !== null &&
-    outSeconds !== null &&
-    outSeconds > inSeconds;
+    sequenceInMs !== null &&
+    sequenceOutMs !== null &&
+    sequenceOutMs > sequenceInMs;
   const looksLikeWholeSequenceDefault =
     hasPositiveRange &&
-    endSeconds !== null &&
-    isNearlyEqual(inSeconds, 0) &&
-    isNearlyEqual(outSeconds, endSeconds);
+    sequenceEndMs !== null &&
+    isNearlyEqual(sequenceInMs, 0) &&
+    isNearlyEqual(sequenceOutMs, sequenceEndMs);
 
   return {
     valid: hasPositiveRange && !looksLikeWholeSequenceDefault,
+    sequenceInMs,
+    sequenceOutMs,
+    durationMs: hasPositiveRange ? durationMs : null,
+    sequenceEndMs,
     inSeconds,
     outSeconds,
     endSeconds,
+    rawInPointDebug,
+    rawOutPointDebug,
+    rawEndPointDebug,
   };
 }
 
@@ -1074,7 +1136,13 @@ function isActiveSequencePropertyName(propertyName: string): boolean {
     /^(sequence|timeline)$/i.test(propertyName);
 }
 
-async function assertValidInOutRange(activeSequence: UnknownRecord): Promise<void> {
+async function assertValidInOutRange(activeSequence: UnknownRecord): Promise<{
+  sequenceInMs: number;
+  sequenceOutMs: number;
+  durationMs: number;
+  rawInPointDebug: PremiereTimePointDebug;
+  rawOutPointDebug: PremiereTimePointDebug;
+}> {
   const getInPoint = asFunction(activeSequence.getInPoint);
   const getOutPoint = asFunction(activeSequence.getOutPoint);
   if (!getInPoint || !getOutPoint) {
@@ -1100,6 +1168,29 @@ async function assertValidInOutRange(activeSequence: UnknownRecord): Promise<voi
     );
   }
   const validation = validateInOutRange(inPoint, outPoint, endPoint);
+  console.info("[GLIFO] sequence:getInPoint:raw", {
+    rawValue: inPoint,
+    debug: validation.rawInPointDebug,
+  });
+  console.info("[GLIFO] sequence:getOutPoint:raw", {
+    rawValue: outPoint,
+    debug: validation.rawOutPointDebug,
+  });
+  console.info("[GLIFO] sequence:getEndTime:raw", {
+    rawValue: endPoint,
+    debug: validation.rawEndPointDebug,
+  });
+  console.info("[GLIFO] sequence:in-out:resolved", {
+    sequenceInMs: validation.sequenceInMs,
+    sequenceOutMs: validation.sequenceOutMs,
+    durationMs: validation.durationMs,
+    inDisplay: formatMillisecondsForDebug(validation.sequenceInMs),
+    outDisplay: formatMillisecondsForDebug(validation.sequenceOutMs),
+    durationDisplay: formatMillisecondsForDebug(validation.durationMs),
+    inSource: validation.rawInPointDebug.conversion?.source ?? null,
+    outSource: validation.rawOutPointDebug.conversion?.source ?? null,
+  });
+
   if (!validation.valid) {
     throw new AudioExportError(
       "in_out_missing",
@@ -1107,6 +1198,26 @@ async function assertValidInOutRange(activeSequence: UnknownRecord): Promise<voi
       validation,
     );
   }
+
+  if (
+    validation.sequenceInMs === null ||
+    validation.sequenceOutMs === null ||
+    validation.durationMs === null
+  ) {
+    throw new AudioExportError(
+      "in_out_missing",
+      "Marcá un rango In/Out en la timeline o usá Transcribir archivo.",
+      validation,
+    );
+  }
+
+  return {
+    sequenceInMs: validation.sequenceInMs,
+    sequenceOutMs: validation.sequenceOutMs,
+    durationMs: validation.durationMs,
+    rawInPointDebug: validation.rawInPointDebug,
+    rawOutPointDebug: validation.rawOutPointDebug,
+  };
 }
 
 async function resolveWavPresetPath(localFileSystem: UnknownRecord): Promise<string> {
@@ -2007,18 +2118,308 @@ function getValueKind(value: unknown): string {
   return typeof value;
 }
 
-function readTickSeconds(value: unknown): number | null {
+export function readPremiereTimeMilliseconds(value: unknown): number | null {
+  return convertPremiereTimeToMilliseconds(value)?.milliseconds ?? null;
+}
+
+export function createPremiereTimePointDebug(value: unknown): PremiereTimePointDebug {
   const valueObject = asRecord(value);
-  const seconds = asNumber(valueObject?.seconds);
+  const conversion = convertPremiereTimeToMilliseconds(value);
+
+  return {
+    valueKind: getValueKind(value),
+    enumerableKeys: valueObject ? safeEnumerableKeys(valueObject) : [],
+    propertyNames: valueObject ? safePropertyNames(valueObject) : [],
+    seconds: createTimeDebugProperty(valueObject, "seconds"),
+    ticks: createTimeDebugProperty(valueObject, "ticks"),
+    timebase: createTimeDebugProperty(valueObject, "timebase"),
+    value: createTimeDebugProperty(valueObject, "value"),
+    frames: createTimeDebugProperty(valueObject, "frames"),
+    frameRate: createTimeDebugProperty(valueObject, "frameRate"),
+    fps: createTimeDebugProperty(valueObject, "fps"),
+    toStringValue: readToStringValue(value),
+    conversion: conversion
+      ? {
+          milliseconds: conversion.milliseconds,
+          source: conversion.source,
+        }
+      : null,
+  };
+}
+
+function convertPremiereTimeToMilliseconds(
+  value: unknown,
+): PremiereTimeConversionDebug | null {
+  if (typeof value === "number") {
+    return millisecondsFromNumericPrimitive(value);
+  }
+
+  if (typeof value === "bigint") {
+    return millisecondsFromTicks(Number(value), "bigint-ticks");
+  }
+
+  if (typeof value === "string") {
+    return millisecondsFromString(value, "string");
+  }
+
+  const valueObject = asRecord(value);
+  if (!valueObject) {
+    return null;
+  }
+
+  const seconds = asNumberLike(safeGetProperty(valueObject, "seconds"));
   if (seconds !== null) {
-    return seconds;
+    return {
+      milliseconds: Math.round(seconds * 1000),
+      source: "seconds",
+    };
+  }
+
+  const ticks = asNumberLike(safeGetProperty(valueObject, "ticks"));
+  if (ticks !== null) {
+    return millisecondsFromTicks(ticks, "ticks");
+  }
+
+  const frameRate = readFrameRate(valueObject);
+  const frames = asNumberLike(safeGetProperty(valueObject, "frames"));
+  if (frames !== null && frameRate !== null && frameRate > 0) {
+    return {
+      milliseconds: Math.round((frames / frameRate) * 1000),
+      source: "frames/frameRate",
+    };
+  }
+
+  const rawValue = safeGetProperty(valueObject, "value");
+  const numericValue = asNumberLike(rawValue);
+  const timebase = asNumberLike(safeGetProperty(valueObject, "timebase"));
+  if (numericValue !== null && timebase !== null && timebase > 0) {
+    return {
+      milliseconds: Math.round((numericValue / timebase) * 1000),
+      source: "value/timebase",
+    };
+  }
+
+  const rawValueString = typeof rawValue === "string" ? rawValue : null;
+  const valueStringConversion = rawValueString
+    ? millisecondsFromString(rawValueString, "value-string", frameRate)
+    : null;
+  if (valueStringConversion) {
+    return valueStringConversion;
+  }
+
+  const stringValue = readToStringValue(value);
+  return stringValue ? millisecondsFromString(stringValue, "toString", frameRate) : null;
+}
+
+function millisecondsFromNumericPrimitive(value: number): PremiereTimeConversionDebug | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return {
+    milliseconds: Math.round(value * 1000),
+    source: "number-seconds",
+  };
+}
+
+function millisecondsFromTicks(
+  ticks: number,
+  source: string,
+): PremiereTimeConversionDebug | null {
+  if (!Number.isFinite(ticks)) {
+    return null;
+  }
+
+  return {
+    milliseconds: Math.round((ticks / PREMIERE_TICKS_PER_SECOND) * 1000),
+    source,
+  };
+}
+
+function millisecondsFromString(
+  value: string,
+  source: string,
+  frameRate: number | null = null,
+): PremiereTimeConversionDebug | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "[object Object]") {
+    return null;
+  }
+
+  const parsedTimecodeMs = parseClockTimeMilliseconds(trimmed, frameRate);
+  if (parsedTimecodeMs !== null) {
+    return {
+      milliseconds: parsedTimecodeMs,
+      source,
+    };
+  }
+
+  const numericValue = Number(trimmed);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  if (Math.abs(numericValue) > 1_000_000_000) {
+    return millisecondsFromTicks(numericValue, `${source}-ticks`);
+  }
+
+  return {
+    milliseconds: Math.round(numericValue * 1000),
+    source: `${source}-seconds`,
+  };
+}
+
+function parseClockTimeMilliseconds(
+  value: string,
+  frameRate: number | null,
+): number | null {
+  const frameMatch = value.match(/^(\d+):([0-5]\d):([0-5]\d)[:;](\d+)$/);
+  if (frameMatch && frameRate !== null && frameRate > 0) {
+    const hours = Number(frameMatch[1]);
+    const minutes = Number(frameMatch[2]);
+    const seconds = Number(frameMatch[3]);
+    const frames = Number(frameMatch[4]);
+    return Math.round(((((hours * 60 + minutes) * 60) + seconds) * 1000) +
+      ((frames / frameRate) * 1000));
+  }
+
+  const match = value.match(/^(\d+):([0-5]\d):([0-5]\d)(?:[.,](\d{1,3}))?$/);
+  if (match) {
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+    const milliseconds = normalizeMillisecondsPart(match[4] ?? "");
+    return (((hours * 60 + minutes) * 60) + seconds) * 1000 + milliseconds;
+  }
+
+  const minuteMatch = value.match(/^(\d+):([0-5]\d)(?:[.,](\d{1,3}))?$/);
+  if (minuteMatch) {
+    const minutes = Number(minuteMatch[1]);
+    const seconds = Number(minuteMatch[2]);
+    const milliseconds = normalizeMillisecondsPart(minuteMatch[3] ?? "");
+    return (minutes * 60 + seconds) * 1000 + milliseconds;
   }
 
   return null;
 }
 
+function readFrameRate(valueObject: UnknownRecord): number | null {
+  const explicitFrameRate =
+    asNumberLike(safeGetProperty(valueObject, "frameRate")) ??
+    asNumberLike(safeGetProperty(valueObject, "fps"));
+  if (explicitFrameRate !== null && explicitFrameRate > 0) {
+    return explicitFrameRate;
+  }
+
+  const timebase = asNumberLike(safeGetProperty(valueObject, "timebase"));
+  if (timebase === null || timebase <= 0) {
+    return null;
+  }
+
+  if (timebase <= 240) {
+    return timebase;
+  }
+
+  const inferredFrameRate = PREMIERE_TICKS_PER_SECOND / timebase;
+  if (inferredFrameRate >= 1 && inferredFrameRate <= 240) {
+    return inferredFrameRate;
+  }
+
+  return null;
+}
+
+function normalizeMillisecondsPart(value: string): number {
+  if (!value) {
+    return 0;
+  }
+
+  return Number(value.padEnd(3, "0"));
+}
+
+function createTimeDebugProperty(
+  valueObject: UnknownRecord | null,
+  propertyName: string,
+): PremiereTimeDebugProperty {
+  if (!valueObject || !hasPropertyKey(valueObject, propertyName)) {
+    return {
+      exists: false,
+      value: null,
+      valueKind: "undefined",
+      numericValue: null,
+    };
+  }
+
+  const value = safeGetProperty(valueObject, propertyName);
+  return {
+    exists: true,
+    value: formatUnknownValue(value),
+    valueKind: getValueKind(value),
+    numericValue: asNumberLike(value),
+  };
+}
+
+function readToStringValue(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  try {
+    const stringValue = String(value);
+    return stringValue.length > 0 ? stringValue : null;
+  } catch {
+    return null;
+  }
+}
+
+function asNumberLike(value: unknown): number | null {
+  const directNumber = asNumber(value);
+  if (directNumber !== null) {
+    return directNumber;
+  }
+
+  if (typeof value === "bigint") {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) ? numberValue : null;
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function msToSeconds(value: number | null): number | null {
+  return value === null ? null : value / 1000;
+}
+
+function formatMillisecondsForDebug(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  const totalMs = Math.max(0, Math.round(value));
+  const minutes = Math.floor(totalMs / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+
+  return [
+    String(minutes).padStart(2, "0"),
+    ":",
+    String(seconds).padStart(2, "0"),
+    ".",
+    String(milliseconds).padStart(3, "0"),
+  ].join("");
+}
+
 function isNearlyEqual(left: number, right: number): boolean {
-  return Math.abs(left - right) < 0.001;
+  return Math.abs(left - right) < 1;
 }
 
 function dedupeEventNames(values: unknown[]): unknown[] {

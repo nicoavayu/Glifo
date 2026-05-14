@@ -24,6 +24,8 @@ interface BackendSuccessPayload extends Record<string, unknown> {
   model?: string;
   fullText?: string;
   segments?: unknown;
+  words?: unknown;
+  captionSegments?: unknown;
   metadata?: unknown;
 }
 
@@ -133,9 +135,118 @@ function normalizeSuccessPayload(payload: BackendSuccessPayload): TranscribeResp
     provider: typeof payload.provider === "string" ? payload.provider : "unknown",
     model: typeof payload.model === "string" ? payload.model : "unknown",
     fullText: typeof payload.fullText === "string" ? payload.fullText : "",
-    segments: Array.isArray(payload.segments)
-      ? payload.segments as TranscribeResponse["segments"]
-      : [],
+    segments: normalizeSegments(payload.segments),
+    words: normalizeWords(payload.words),
+    captionSegments: normalizeCaptionSegments(payload.captionSegments),
     metadata,
   };
+}
+
+function normalizeSegments(value: unknown): TranscribeResponse["segments"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const segments: TranscribeResponse["segments"] = [];
+  for (const segment of value) {
+    const segmentObject = asRecord(segment);
+    if (!segmentObject) {
+      continue;
+    }
+
+    const startMs = asFiniteNumber(segmentObject.startMs);
+    const endMs = asFiniteNumber(segmentObject.endMs);
+    const text = typeof segmentObject.text === "string" ? segmentObject.text.trim() : "";
+    if (startMs === null || endMs === null || startMs < 0 || endMs <= startMs || !text) {
+      continue;
+    }
+
+    const speaker = typeof segmentObject.speaker === "string"
+      ? segmentObject.speaker
+      : null;
+
+    segments.push({
+      startMs,
+      endMs,
+      text,
+      ...(speaker ? { speaker } : {}),
+    });
+  }
+
+  return segments;
+}
+
+function normalizeWords(value: unknown): TranscribeResponse["words"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const words: TranscribeResponse["words"] = [];
+  for (const word of value) {
+    const wordObject = asRecord(word);
+    if (!wordObject) {
+      continue;
+    }
+
+    const startMs = asFiniteNumber(wordObject.startMs);
+    const endMs = asFiniteNumber(wordObject.endMs);
+    const text = typeof wordObject.word === "string" ? wordObject.word.trim() : "";
+    if (startMs === null || endMs === null || startMs < 0 || endMs <= startMs || !text) {
+      continue;
+    }
+
+    words.push({
+      startMs,
+      endMs,
+      word: text,
+    });
+  }
+
+  return words;
+}
+
+function normalizeCaptionSegments(value: unknown): TranscribeResponse["captionSegments"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const captionSegments: TranscribeResponse["captionSegments"] = [];
+  for (const segment of value) {
+    const segmentObject = asRecord(segment);
+    if (!segmentObject) {
+      continue;
+    }
+
+    const startMs = asFiniteNumber(segmentObject.startMs);
+    const endMs = asFiniteNumber(segmentObject.endMs);
+    const text = typeof segmentObject.text === "string" ? segmentObject.text.trim() : "";
+    if (startMs === null || endMs === null || startMs < 0 || endMs <= startMs || !text) {
+      continue;
+    }
+
+    const timelineStartMs = asFiniteNumber(segmentObject.timelineStartMs);
+    const timelineEndMs = asFiniteNumber(segmentObject.timelineEndMs);
+
+    captionSegments.push({
+      startMs,
+      endMs,
+      text,
+      ...(timelineStartMs !== null ? { timelineStartMs } : {}),
+      ...(timelineEndMs !== null ? { timelineEndMs } : {}),
+    });
+  }
+
+  return captionSegments;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "object" && value !== null) {
+    return value as Record<string, unknown>;
+  }
+
+  return null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : null;
 }

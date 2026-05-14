@@ -198,6 +198,19 @@ body {
   overflow-wrap: anywhere;
 }
 
+.panel__segmentsList {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .panel__textHeader {
   display: flex;
   align-items: center;
