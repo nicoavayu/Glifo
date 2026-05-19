@@ -211,6 +211,16 @@ body {
   overflow-wrap: anywhere;
 }
 
+.panel__srtInstruction {
+  margin: 0 0 8px 0;
+  color: #ffd08a;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .panel__textHeader {
   display: flex;
   align-items: center;

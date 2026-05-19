@@ -7,6 +7,10 @@ import {
   exportActiveSequenceInOutToWav,
   isAudioExportError,
 } from "../premiere/audioExport";
+import {
+  isSrtExportError,
+  saveCaptionSegmentsAsSrtFile,
+} from "../services/srt";
 import type { ExportedWav } from "../premiere/audioExport";
 import type { TranscribeResponse } from "../types/transcribe";
 
@@ -21,6 +25,7 @@ interface ResultElements {
   segmentsSection: HTMLElement;
   segmentsPreview: HTMLPreElement;
   captionsSection: HTMLElement;
+  srtInstruction: HTMLParagraphElement;
   captionsPreview: HTMLPreElement;
   textSection: HTMLElement;
   fullTextPreview: HTMLPreElement;
@@ -32,6 +37,10 @@ export function createPanelController(elements: PanelElements) {
   const mount = () => {
     const { root } = elements;
     let latestFullText = "";
+    let latestSrtPayload: {
+      captionSegments: TranscribeResponse["captionSegments"];
+      sequenceInMs: number | null;
+    } | null = null;
 
     root.style.display = "block";
     root.style.width = "100%";
@@ -68,6 +77,7 @@ export function createPanelController(elements: PanelElements) {
 
             <section id="resultCaptionsSection" class="panel__resultSection" hidden>
               <h2 class="panel__sectionTitle">Caption segments</h2>
+              <p id="srtInstruction" class="panel__srtInstruction" hidden></p>
               <pre id="captionsPreview" class="panel__segmentsList"></pre>
             </section>
 
@@ -118,6 +128,16 @@ export function createPanelController(elements: PanelElements) {
     panelActions.appendChild(fileButton);
     panelActions.appendChild(selectionButton);
 
+    const srtButton = document.createElement("button");
+    srtButton.id = "srtButton";
+    srtButton.className = "panel__button panel__button--secondary";
+    srtButton.type = "button";
+    srtButton.textContent = "Exportar SRT";
+    srtButton.title = "Guarda un archivo .srt desde los caption segments de la última transcripción.";
+    srtButton.hidden = true;
+    srtButton.disabled = true;
+    panelActions.appendChild(srtButton);
+
     renderEmptyResult(resultElements);
 
     resultElements.copyButton.addEventListener("click", async () => {
@@ -156,8 +176,11 @@ export function createPanelController(elements: PanelElements) {
 
       fileButton.disabled = true;
       selectionButton.disabled = true;
+      srtButton.disabled = true;
+      srtButton.hidden = true;
       fileButton.textContent = "Seleccionando archivo...";
       latestFullText = "";
+      latestSrtPayload = null;
       statusLabel.textContent = "Estado: seleccionando archivo...";
       renderPendingResult(resultElements, "Abrí el selector y elegí un archivo exportado desde Premiere.");
 
@@ -187,6 +210,12 @@ export function createPanelController(elements: PanelElements) {
         });
 
         latestFullText = transcript.fullText;
+        latestSrtPayload = {
+          captionSegments: transcript.captionSegments,
+          sequenceInMs: null,
+        };
+        srtButton.hidden = false;
+        srtButton.disabled = !canExportSrt(latestSrtPayload);
         statusLabel.textContent = "Estado: transcripción lista";
         renderTranscript(resultElements, transcript);
 
@@ -209,6 +238,7 @@ export function createPanelController(elements: PanelElements) {
       } finally {
         fileButton.disabled = false;
         selectionButton.disabled = false;
+        srtButton.disabled = srtButton.hidden || !canExportSrt(latestSrtPayload);
         fileButton.textContent = "Transcribir archivo";
       }
     });
@@ -220,8 +250,11 @@ export function createPanelController(elements: PanelElements) {
 
       fileButton.disabled = true;
       selectionButton.disabled = true;
+      srtButton.disabled = true;
+      srtButton.hidden = true;
       selectionButton.textContent = "Exportando...";
       latestFullText = "";
+      latestSrtPayload = null;
       statusLabel.textContent = "Estado: exportando audio...";
       renderPendingResult(resultElements, "Exportando audio del rango...");
 
@@ -252,6 +285,12 @@ export function createPanelController(elements: PanelElements) {
         }
 
         latestFullText = transcript.fullText;
+        latestSrtPayload = {
+          captionSegments: transcript.captionSegments,
+          sequenceInMs: exportedWav.sequenceInMs,
+        };
+        srtButton.hidden = false;
+        srtButton.disabled = !canExportSrt(latestSrtPayload);
         statusLabel.textContent = "Estado: transcripción lista";
         renderTranscript(resultElements, hideTemporaryWavPath(transcript), exportedWav);
 
@@ -276,7 +315,72 @@ export function createPanelController(elements: PanelElements) {
         await cleanupExportedWavSafely(cleanupExportedWav, exportedWavFilename);
         fileButton.disabled = false;
         selectionButton.disabled = false;
+        srtButton.disabled = srtButton.hidden || !canExportSrt(latestSrtPayload);
         selectionButton.textContent = "Transcribir rango In/Out";
+      }
+    });
+
+    srtButton.addEventListener("click", async () => {
+      if (!latestSrtPayload) {
+        statusLabel.textContent = "Estado: error";
+        setCopyFeedback(
+          resultElements,
+          "No hay captionSegments disponibles para exportar SRT.",
+          "warning",
+        );
+        return;
+      }
+
+      if (latestSrtPayload.captionSegments.length === 0) {
+        statusLabel.textContent = "Estado: error al exportar SRT";
+        setCopyFeedback(
+          resultElements,
+          "No hay captionSegments disponibles para exportar SRT.",
+          "warning",
+        );
+        return;
+      }
+
+      fileButton.disabled = true;
+      selectionButton.disabled = true;
+      srtButton.disabled = true;
+      srtButton.textContent = "Guardando SRT...";
+      statusLabel.textContent = "Estado: guardando SRT...";
+      setCopyFeedback(
+        resultElements,
+        "Elegí dónde guardar el archivo .srt.",
+        "neutral",
+      );
+
+      try {
+        const result = await saveCaptionSegmentsAsSrtFile(latestSrtPayload.captionSegments);
+        if (result.status === "cancelled") {
+          statusLabel.textContent = "Estado: exportación SRT cancelada";
+          setCopyFeedback(resultElements, "No se guardó ningún SRT.", "warning");
+          return;
+        }
+
+        const instruction = buildSrtPlacementInstruction(latestSrtPayload.sequenceInMs);
+        statusLabel.textContent = `Estado: SRT exportado (${result.cueCount ?? 0})`;
+        setCopyFeedback(
+          resultElements,
+          instruction,
+          "success",
+        );
+        console.info("[GLIFO] srt:export:ok", result);
+      } catch (error) {
+        const message = formatSrtExportError(error);
+        statusLabel.textContent = "Estado: error al exportar SRT";
+        setCopyFeedback(resultElements, message, "warning");
+        console.error("[GLIFO] srt:export:error", {
+          message: getErrorMessage(error),
+          code: isSrtExportError(error) ? error.code : null,
+        });
+      } finally {
+        fileButton.disabled = false;
+        selectionButton.disabled = false;
+        srtButton.disabled = !canExportSrt(latestSrtPayload);
+        srtButton.textContent = "Exportar SRT";
       }
     });
   };
@@ -284,6 +388,13 @@ export function createPanelController(elements: PanelElements) {
   return {
     mount,
   };
+}
+
+function canExportSrt(payload: {
+  captionSegments: TranscribeResponse["captionSegments"];
+  sequenceInMs: number | null;
+} | null): boolean {
+  return payload !== null;
 }
 
 async function cleanupExportedWavSafely(
@@ -321,6 +432,7 @@ function getResultElements(root: HTMLElement): ResultElements | null {
   const segmentsSection = root.querySelector<HTMLElement>("#resultSegmentsSection");
   const segmentsPreview = root.querySelector<HTMLPreElement>("#segmentsPreview");
   const captionsSection = root.querySelector<HTMLElement>("#resultCaptionsSection");
+  const srtInstruction = root.querySelector<HTMLParagraphElement>("#srtInstruction");
   const captionsPreview = root.querySelector<HTMLPreElement>("#captionsPreview");
   const textSection = root.querySelector<HTMLElement>("#resultTextSection");
   const fullTextPreview = root.querySelector<HTMLPreElement>("#fullTextPreview");
@@ -334,6 +446,7 @@ function getResultElements(root: HTMLElement): ResultElements | null {
     !segmentsSection ||
     !segmentsPreview ||
     !captionsSection ||
+    !srtInstruction ||
     !captionsPreview ||
     !textSection ||
     !fullTextPreview ||
@@ -350,6 +463,7 @@ function getResultElements(root: HTMLElement): ResultElements | null {
     segmentsSection,
     segmentsPreview,
     captionsSection,
+    srtInstruction,
     captionsPreview,
     textSection,
     fullTextPreview,
@@ -367,6 +481,8 @@ function renderEmptyResult(elements: ResultElements): void {
   elements.metadataSection.hidden = true;
   elements.segmentsSection.hidden = true;
   elements.captionsSection.hidden = true;
+  elements.srtInstruction.hidden = true;
+  elements.srtInstruction.textContent = "";
   elements.textSection.hidden = true;
   elements.metadataList.textContent = "";
   elements.segmentsPreview.textContent = "";
@@ -382,6 +498,8 @@ function renderPendingResult(elements: ResultElements, message: string): void {
   elements.metadataSection.hidden = true;
   elements.segmentsSection.hidden = true;
   elements.captionsSection.hidden = true;
+  elements.srtInstruction.hidden = true;
+  elements.srtInstruction.textContent = "";
   elements.textSection.hidden = true;
   elements.metadataList.textContent = "";
   elements.segmentsPreview.textContent = "";
@@ -403,6 +521,10 @@ function renderTranscript(
   elements.textSection.hidden = false;
   elements.metadataList.textContent = "";
   elements.segmentsPreview.textContent = formatSegmentsText(response.segments);
+  elements.srtInstruction.hidden = !rangeDebug;
+  elements.srtInstruction.textContent = rangeDebug
+    ? buildSrtPlacementInstruction(rangeDebug.sequenceInMs)
+    : "";
   elements.captionsPreview.textContent = formatCaptionSegmentsText(
     response.captionSegments,
     rangeDebug ? { sequenceInMs: rangeDebug.sequenceInMs } : undefined,
@@ -445,6 +567,8 @@ function renderErrorResult(elements: ResultElements, message: string): void {
   elements.metadataSection.hidden = true;
   elements.segmentsSection.hidden = true;
   elements.captionsSection.hidden = true;
+  elements.srtInstruction.hidden = true;
+  elements.srtInstruction.textContent = "";
   elements.textSection.hidden = true;
   elements.metadataList.textContent = "";
   elements.segmentsPreview.textContent = "";
@@ -510,6 +634,32 @@ export function formatMs(ms: number): string {
 
 function formatDebugMs(ms: number): string {
   return `${formatMs(ms)} (${Math.round(ms)} ms)`;
+}
+
+export function formatTimelineMs(ms: number): string {
+  const totalMs = Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0;
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const seconds = Math.floor((totalMs % 60_000) / 1000);
+  const milliseconds = totalMs % 1000;
+
+  return [
+    String(hours).padStart(2, "0"),
+    ":",
+    String(minutes).padStart(2, "0"),
+    ":",
+    String(seconds).padStart(2, "0"),
+    ".",
+    String(milliseconds).padStart(3, "0"),
+  ].join("");
+}
+
+function buildSrtPlacementInstruction(sequenceInMs: number | null): string {
+  if (sequenceInMs !== null && Number.isFinite(sequenceInMs) && sequenceInMs >= 0) {
+    return `Importá este SRT en Premiere y arrastralo al In del rango: ${formatTimelineMs(sequenceInMs)}`;
+  }
+
+  return "Importá este SRT en Premiere y colocalo manualmente en el inicio que corresponda.";
 }
 
 function renderMetadataRow(container: HTMLElement, label: string, value: string): void {
@@ -610,6 +760,22 @@ function formatRangeTranscriptionError(error: unknown): string {
   const message = error instanceof Error ? error.message : "Error desconocido";
   return [
     "No se pudo transcribir el rango In/Out",
+    `message: ${message}`,
+  ].join("\n");
+}
+
+function formatSrtExportError(error: unknown): string {
+  if (isSrtExportError(error)) {
+    return [
+      "No se pudo exportar el SRT",
+      `code: ${error.code}`,
+      `message: ${error.message}`,
+    ].join("\n");
+  }
+
+  const message = error instanceof Error ? error.message : "Error desconocido";
+  return [
+    "No se pudo exportar el SRT",
     `message: ${message}`,
   ].join("\n");
 }

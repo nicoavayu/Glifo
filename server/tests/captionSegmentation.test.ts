@@ -77,4 +77,50 @@ describe("buildCaptionSegments", () => {
       { startMs: 750, endMs: 1900, text: "como estas hoy" },
     ]);
   });
+
+  it("prioriza puntuacion fuerte para cerrar frases naturales", () => {
+    const captions = buildCaptionSegments([
+      { startMs: 0, endMs: 300, word: "todos" },
+      { startMs: 350, endMs: 650, word: "tus" },
+      { startMs: 700, endMs: 1000, word: "seres" },
+      { startMs: 1050, endMs: 1400, word: "queridos." },
+      { startMs: 1450, endMs: 1750, word: "Te" },
+      { startMs: 1800, endMs: 2100, word: "mando" },
+      { startMs: 2150, endMs: 2400, word: "un" },
+      { startMs: 2450, endMs: 2800, word: "abrazo" },
+      { startMs: 2850, endMs: 3300, word: "académico" },
+    ]);
+
+    expect(captions).toEqual([
+      { startMs: 0, endMs: 1400, text: "todos tus seres queridos." },
+      { startMs: 1450, endMs: 3300, text: "Te mando un abrazo académico" },
+    ]);
+  });
+
+  it("evita cortar frases en conectores o fragmentos si puede extender un poco", () => {
+    const captions = buildCaptionSegments([
+      { startMs: 0, endMs: 300, word: "todos" },
+      { startMs: 350, endMs: 650, word: "tus" },
+      { startMs: 700, endMs: 1000, word: "seres" },
+      { startMs: 1050, endMs: 1350, word: "queridos" },
+      { startMs: 1400, endMs: 1700, word: "te" },
+      { startMs: 1750, endMs: 2050, word: "mando" },
+      { startMs: 2100, endMs: 2400, word: "un" },
+      { startMs: 2450, endMs: 2800, word: "abrazo" },
+      { startMs: 2850, endMs: 3300, word: "académico" },
+    ], {
+      maxCharsPerLine: 32,
+      maxLines: 1,
+      maxDurationMs: 2500,
+    });
+
+    expect(captions).toEqual([
+      { startMs: 0, endMs: 1350, text: "todos tus seres queridos" },
+      { startMs: 1400, endMs: 3300, text: "te mando un abrazo académico" },
+    ]);
+    expect(captions.map((caption) => caption.text)).not.toEqual([
+      "todos tus seres queridos te un",
+      "académico",
+    ]);
+  });
 });

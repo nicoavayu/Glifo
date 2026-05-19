@@ -3,6 +3,7 @@ import {
   formatCaptionSegmentsText,
   formatMs,
   formatSegmentsText,
+  formatTimelineMs,
 } from "../src/panel/panelController";
 
 describe("formatMs", () => {
@@ -15,6 +16,14 @@ describe("formatMs", () => {
   it("normaliza valores negativos o no finitos a cero", () => {
     expect(formatMs(-1)).toBe("00:00.000");
     expect(formatMs(Number.NaN)).toBe("00:00.000");
+  });
+});
+
+describe("formatTimelineMs", () => {
+  it("formatea milisegundos como HH:MM:SS.mmm para instrucciones de timeline", () => {
+    expect(formatTimelineMs(0)).toBe("00:00:00.000");
+    expect(formatTimelineMs(221_000)).toBe("00:03:41.000");
+    expect(formatTimelineMs(3_605_042)).toBe("01:00:05.042");
   });
 });
 

@@ -26,6 +26,61 @@ export const DEFAULT_CAPTION_SEGMENTATION_OPTIONS: CaptionSegmentationOptions = 
   maxGapMs: 600,
 };
 
+const MAX_DURATION_EXTENSION_RATIO = 1.2;
+const MAX_CHARS_EXTENSION_RATIO = 1.15;
+const MIN_EXTRA_CHARS_BEFORE_FORCED_SPLIT = 8;
+
+const BAD_CAPTION_END_WORDS = new Set([
+  "de",
+  "con",
+  "que",
+  "un",
+  "una",
+  "el",
+  "la",
+  "los",
+  "las",
+  "y",
+  "o",
+  "para",
+  "te",
+  "me",
+  "se",
+  "mi",
+  "tu",
+  "su",
+  "mis",
+  "tus",
+  "sus",
+]);
+
+const BAD_CAPTION_START_WORDS = new Set([
+  "de",
+  "con",
+  "que",
+  "un",
+  "una",
+  "el",
+  "la",
+  "los",
+  "las",
+  "y",
+  "o",
+  "para",
+]);
+
+const NATURAL_PHRASE_START_WORDS = new Set([
+  "te",
+  "me",
+  "se",
+  "nos",
+  "yo",
+  "vos",
+  "tu",
+  "usted",
+  "ustedes",
+]);
+
 export function buildCaptionSegments(
   words: CaptionWord[],
   options: Partial<CaptionSegmentationOptions> = {},
@@ -53,23 +108,12 @@ export function buildCaptionSegments(
       continue;
     }
 
-    const candidate = [...pending, word];
-    if (shouldSplitBeforeWord(candidate, maxCharsTotal, resolvedOptions)) {
-      const splitIndex = chooseSplitIndex(pending);
-      if (splitIndex < pending.length - 1) {
-        flushPending(captions, pending.slice(0, splitIndex + 1));
-        pending = pending.slice(splitIndex + 1);
-      } else {
-        flushPending(captions, pending);
-        pending = [];
-      }
-    }
-
     pending.push(word);
 
-    if (shouldFlushAfterWord(pending, maxCharsTotal, resolvedOptions)) {
-      flushPending(captions, pending);
-      pending = [];
+    const splitIndex = chooseSplitIndex(pending, maxCharsTotal, resolvedOptions);
+    if (splitIndex !== null) {
+      flushPending(captions, pending.slice(0, splitIndex + 1));
+      pending = pending.slice(splitIndex + 1);
     }
   }
 
@@ -105,59 +149,138 @@ function shouldFlushForPause(
   return getDurationMs(words) >= options.minDurationMs;
 }
 
-function shouldSplitBeforeWord(
+function chooseSplitIndex(
   words: CaptionWord[],
   maxCharsTotal: number,
   options: CaptionSegmentationOptions,
-): boolean {
+): number | null {
   if (words.length <= 1) {
-    return false;
-  }
-
-  return getDurationMs(words) > options.maxDurationMs ||
-    joinWords(words).length > maxCharsTotal;
-}
-
-function shouldFlushAfterWord(
-  words: CaptionWord[],
-  maxCharsTotal: number,
-  options: CaptionSegmentationOptions,
-): boolean {
-  if (words.length <= 1) {
-    return false;
+    return null;
   }
 
   const durationMs = getDurationMs(words);
   const textLength = joinWords(words).length;
-  if (durationMs > options.maxDurationMs || textLength > maxCharsTotal) {
-    return true;
-  }
+  const lastWord = words[words.length - 1]?.word ?? "";
 
-  if (!endsWithNaturalPunctuation(words[words.length - 1]?.word ?? "")) {
-    return false;
-  }
-
-  if (durationMs < options.minDurationMs) {
-    return false;
-  }
-
-  return durationMs >= options.maxDurationMs * 0.6 ||
-    textLength >= maxCharsTotal * 0.45 ||
-    endsWithTerminalPunctuation(words[words.length - 1]?.word ?? "");
-}
-
-function chooseSplitIndex(words: CaptionWord[]): number {
-  if (words.length <= 1) {
+  if (endsWithTerminalPunctuation(lastWord) && durationMs >= options.minDurationMs) {
     return words.length - 1;
   }
 
-  for (let index = words.length - 2; index >= 1; index -= 1) {
-    if (endsWithNaturalPunctuation(words[index]?.word ?? "")) {
-      return index;
+  if (
+    endsWithNaturalPunctuation(lastWord) &&
+    durationMs >= options.minDurationMs &&
+    (
+      durationMs >= options.maxDurationMs * 0.6 ||
+      textLength >= maxCharsTotal * 0.45
+    )
+  ) {
+    return words.length - 1;
+  }
+
+  const exceedsDuration = durationMs > options.maxDurationMs;
+  const exceedsChars = textLength > maxCharsTotal;
+  if (!exceedsDuration && !exceedsChars) {
+    return null;
+  }
+
+  const hardDurationExceeded = durationMs > options.maxDurationMs * MAX_DURATION_EXTENSION_RATIO;
+  const hardCharsExceeded = textLength > getHardMaxChars(maxCharsTotal);
+  const bestSplitIndex = chooseBestInternalSplitIndex(words, maxCharsTotal, options);
+  if (bestSplitIndex !== null) {
+    if (
+      isAwkwardSplit(words, bestSplitIndex) &&
+      !hardDurationExceeded &&
+      !hardCharsExceeded
+    ) {
+      return null;
     }
+
+    return bestSplitIndex;
+  }
+
+  if (
+    !hardDurationExceeded &&
+    !hardCharsExceeded &&
+    isBadCaptionEnd(lastWord)
+  ) {
+    return null;
   }
 
   return words.length - 1;
+}
+
+function chooseBestInternalSplitIndex(
+  words: CaptionWord[],
+  maxCharsTotal: number,
+  options: CaptionSegmentationOptions,
+): number | null {
+  let bestIndex: number | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < words.length - 1; index += 1) {
+    const score = scoreSplitIndex(words, index, maxCharsTotal, options);
+    if (score < bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  return bestIndex;
+}
+
+function scoreSplitIndex(
+  words: CaptionWord[],
+  index: number,
+  maxCharsTotal: number,
+  options: CaptionSegmentationOptions,
+): number {
+  const firstPart = words.slice(0, index + 1);
+  const firstDurationMs = getDurationMs(firstPart);
+  const firstTextLength = joinWords(firstPart).length;
+  const splitWord = words[index]?.word ?? "";
+  const nextWord = words[index + 1]?.word ?? "";
+  const gapMs = getGapAfterIndex(words, index);
+  const targetDurationMs = Math.min(options.maxDurationMs * 0.85, getDurationMs(words) * 0.65);
+  const targetChars = Math.min(maxCharsTotal * 0.85, joinWords(words).length * 0.65);
+
+  let score = 0;
+  score += Math.abs(firstDurationMs - targetDurationMs) / 25;
+  score += Math.abs(firstTextLength - targetChars) * 3;
+  score += Math.max(0, firstDurationMs - options.maxDurationMs) / 5;
+  score += Math.max(0, firstTextLength - maxCharsTotal) * 25;
+
+  if (firstDurationMs < options.minDurationMs && firstPart.length <= 1) {
+    score += 500;
+  }
+
+  if (endsWithTerminalPunctuation(splitWord)) {
+    score -= 1000;
+  } else if (endsWithNaturalPunctuation(splitWord)) {
+    score -= 420;
+  }
+
+  score -= Math.min(Math.max(0, gapMs), options.maxGapMs) / 2;
+
+  if (isBadCaptionEnd(splitWord)) {
+    score += 650;
+  }
+
+  if (isBadCaptionStart(nextWord)) {
+    score += 520;
+  }
+
+  if (isNaturalPhraseStart(nextWord) && firstDurationMs >= options.minDurationMs) {
+    score -= 140;
+  }
+
+  return score;
+}
+
+function isAwkwardSplit(words: CaptionWord[], index: number): boolean {
+  const splitWord = words[index]?.word ?? "";
+  const nextWord = words[index + 1]?.word ?? "";
+
+  return isBadCaptionEnd(splitWord) || isBadCaptionStart(nextWord);
 }
 
 function flushPending(captions: CaptionSegment[], words: CaptionWord[]): void {
@@ -195,6 +318,43 @@ function getDurationMs(words: CaptionWord[]): number {
 
 function joinWords(words: CaptionWord[]): string {
   return words.map((word) => word.word).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function getHardMaxChars(maxCharsTotal: number): number {
+  return maxCharsTotal + Math.max(
+    MIN_EXTRA_CHARS_BEFORE_FORCED_SPLIT,
+    Math.round(maxCharsTotal * (MAX_CHARS_EXTENSION_RATIO - 1)),
+  );
+}
+
+function getGapAfterIndex(words: CaptionWord[], index: number): number {
+  const current = words[index];
+  const next = words[index + 1];
+  if (!current || !next) {
+    return 0;
+  }
+
+  return next.startMs - current.endMs;
+}
+
+function isBadCaptionEnd(value: string): boolean {
+  return BAD_CAPTION_END_WORDS.has(normalizeWordForBoundary(value));
+}
+
+function isBadCaptionStart(value: string): boolean {
+  return BAD_CAPTION_START_WORDS.has(normalizeWordForBoundary(value));
+}
+
+function isNaturalPhraseStart(value: string): boolean {
+  return NATURAL_PHRASE_START_WORDS.has(normalizeWordForBoundary(value));
+}
+
+function normalizeWordForBoundary(value: string): string {
+  return value
+    .trim()
+    .toLocaleLowerCase("es")
+    .replace(/^[¿¡"“”'()[\]]+/, "")
+    .replace(/[.,?!¿¡:;"“”'()[\]]+$/g, "");
 }
 
 function endsWithNaturalPunctuation(value: string): boolean {
