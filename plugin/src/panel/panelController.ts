@@ -2,7 +2,19 @@ import {
   isTranscribeApiError,
   requestTranscript,
 } from "../services/api";
-import { pickExportedMediaFile } from "../services/localFilePicker";
+import {
+  pickExportedMediaFile,
+  pickMogrtFile,
+} from "../services/localFilePicker";
+import {
+  isMogrtBridgeError,
+  runCaptionSegmentsMogrtBridgeFlow,
+} from "../services/mogrtBridge";
+import type {
+  MogrtBridgeBatchProgress,
+  MogrtBridgeBatchReport,
+  MogrtBridgeProbeReport,
+} from "../services/mogrtBridge";
 import {
   exportActiveSequenceInOutToWav,
   isAudioExportError,
@@ -138,6 +150,16 @@ export function createPanelController(elements: PanelElements) {
     srtButton.disabled = true;
     panelActions.appendChild(srtButton);
 
+    const mogrtButton = document.createElement("button");
+    mogrtButton.id = "mogrtButton";
+    mogrtButton.className = "panel__button panel__button--secondary";
+    mogrtButton.type = "button";
+    mogrtButton.textContent = "Crear subtítulos MOGRT";
+    mogrtButton.title = "Inserta un MOGRT por cada captionSegment de la última transcripción Fase 2.";
+    mogrtButton.hidden = true;
+    mogrtButton.disabled = true;
+    panelActions.appendChild(mogrtButton);
+
     renderEmptyResult(resultElements);
 
     resultElements.copyButton.addEventListener("click", async () => {
@@ -178,6 +200,8 @@ export function createPanelController(elements: PanelElements) {
       selectionButton.disabled = true;
       srtButton.disabled = true;
       srtButton.hidden = true;
+      mogrtButton.disabled = true;
+      mogrtButton.hidden = true;
       fileButton.textContent = "Seleccionando archivo...";
       latestFullText = "";
       latestSrtPayload = null;
@@ -216,6 +240,8 @@ export function createPanelController(elements: PanelElements) {
         };
         srtButton.hidden = false;
         srtButton.disabled = !canExportSrt(latestSrtPayload);
+        mogrtButton.hidden = true;
+        mogrtButton.disabled = true;
         statusLabel.textContent = "Estado: transcripción lista";
         renderTranscript(resultElements, transcript);
 
@@ -239,6 +265,7 @@ export function createPanelController(elements: PanelElements) {
         fileButton.disabled = false;
         selectionButton.disabled = false;
         srtButton.disabled = srtButton.hidden || !canExportSrt(latestSrtPayload);
+        mogrtButton.disabled = mogrtButton.hidden || !canRunMogrtFlow(latestSrtPayload);
         fileButton.textContent = "Transcribir archivo";
       }
     });
@@ -252,6 +279,8 @@ export function createPanelController(elements: PanelElements) {
       selectionButton.disabled = true;
       srtButton.disabled = true;
       srtButton.hidden = true;
+      mogrtButton.disabled = true;
+      mogrtButton.hidden = true;
       selectionButton.textContent = "Exportando...";
       latestFullText = "";
       latestSrtPayload = null;
@@ -291,6 +320,8 @@ export function createPanelController(elements: PanelElements) {
         };
         srtButton.hidden = false;
         srtButton.disabled = !canExportSrt(latestSrtPayload);
+        mogrtButton.hidden = !canRunMogrtFlow(latestSrtPayload);
+        mogrtButton.disabled = !canRunMogrtFlow(latestSrtPayload);
         statusLabel.textContent = "Estado: transcripción lista";
         renderTranscript(resultElements, hideTemporaryWavPath(transcript), exportedWav);
 
@@ -316,6 +347,7 @@ export function createPanelController(elements: PanelElements) {
         fileButton.disabled = false;
         selectionButton.disabled = false;
         srtButton.disabled = srtButton.hidden || !canExportSrt(latestSrtPayload);
+        mogrtButton.disabled = mogrtButton.hidden || !canRunMogrtFlow(latestSrtPayload);
         selectionButton.textContent = "Transcribir rango In/Out";
       }
     });
@@ -344,6 +376,7 @@ export function createPanelController(elements: PanelElements) {
       fileButton.disabled = true;
       selectionButton.disabled = true;
       srtButton.disabled = true;
+      mogrtButton.disabled = true;
       srtButton.textContent = "Guardando SRT...";
       statusLabel.textContent = "Estado: guardando SRT...";
       setCopyFeedback(
@@ -380,7 +413,90 @@ export function createPanelController(elements: PanelElements) {
         fileButton.disabled = false;
         selectionButton.disabled = false;
         srtButton.disabled = !canExportSrt(latestSrtPayload);
+        mogrtButton.disabled = mogrtButton.hidden || !canRunMogrtFlow(latestSrtPayload);
         srtButton.textContent = "Exportar SRT";
+      }
+    });
+
+    mogrtButton.addEventListener("click", async () => {
+      if (!canRunMogrtFlow(latestSrtPayload)) {
+        statusLabel.textContent = "Estado: MOGRT no disponible";
+        setCopyFeedback(
+          resultElements,
+          "Crear subtítulos MOGRT requiere captionSegments y sequenceInMs de Fase 2.",
+          "warning",
+        );
+        return;
+      }
+
+      const payload = latestSrtPayload;
+      fileButton.disabled = true;
+      selectionButton.disabled = true;
+      srtButton.disabled = true;
+      mogrtButton.disabled = true;
+      mogrtButton.textContent = "Seleccionando MOGRT...";
+      statusLabel.textContent = "Estado: seleccionando MOGRT...";
+      setCopyFeedback(
+        resultElements,
+        "Elegí un archivo .mogrt local. Se usará para todos los captionSegments.",
+        "neutral",
+      );
+
+      try {
+        const mogrtFile = await pickMogrtFile();
+        if (!mogrtFile) {
+          statusLabel.textContent = "Estado: MOGRT cancelado";
+          setCopyFeedback(resultElements, "No se seleccionó ningún MOGRT.", "warning");
+          return;
+        }
+
+        mogrtButton.textContent = "Creando MOGRTs...";
+        statusLabel.textContent = `Estado: creando subtítulos MOGRT (0/${payload.captionSegments.length})`;
+        setCopyFeedback(
+          resultElements,
+          "Creando un MOGRT por captionSegment. Dejá abierto el panel CEP GLIFO Bridge.",
+          "neutral",
+        );
+
+        const report = await runCaptionSegmentsMogrtBridgeFlow({
+          captionSegments: payload.captionSegments,
+          sequenceInMs: payload.sequenceInMs,
+          mogrtPath: mogrtFile.nativePath,
+          onProgress: (progress) => {
+            renderMogrtProgress(statusLabel, resultElements, progress);
+          },
+        });
+
+        const feedback = formatMogrtBatchFeedback(report);
+        statusLabel.textContent = formatMogrtBatchStatus(report);
+        setCopyFeedback(
+          resultElements,
+          feedback,
+          report.status === "ok" ? "success" : "warning",
+        );
+        console.info("[GLIFO] mogrt-bridge:panel-result", {
+          mogrtName: mogrtFile.name,
+          report,
+        });
+      } catch (error) {
+        statusLabel.textContent = "Estado: error al crear MOGRTs";
+        const message = isMogrtBridgeError(error) && error.code === "cep_bridge_inactive"
+          ? "CEP bridge no está activo."
+          : getErrorMessage(error);
+        setCopyFeedback(
+          resultElements,
+          `No se pudieron crear subtítulos MOGRT: ${message}`,
+          "warning",
+        );
+        console.error("[GLIFO] mogrt-bridge:panel-error", {
+          message: getErrorMessage(error),
+        });
+      } finally {
+        fileButton.disabled = false;
+        selectionButton.disabled = false;
+        srtButton.disabled = !canExportSrt(latestSrtPayload);
+        mogrtButton.disabled = mogrtButton.hidden || !canRunMogrtFlow(latestSrtPayload);
+        mogrtButton.textContent = "Crear subtítulos MOGRT";
       }
     });
   };
@@ -395,6 +511,21 @@ function canExportSrt(payload: {
   sequenceInMs: number | null;
 } | null): boolean {
   return payload !== null;
+}
+
+function canRunMogrtFlow(payload: {
+  captionSegments: TranscribeResponse["captionSegments"];
+  sequenceInMs: number | null;
+} | null): payload is {
+  captionSegments: TranscribeResponse["captionSegments"];
+  sequenceInMs: number;
+} {
+  return Boolean(
+    payload &&
+    payload.captionSegments.length > 0 &&
+    payload.sequenceInMs !== null &&
+    Number.isFinite(payload.sequenceInMs),
+  );
 }
 
 async function cleanupExportedWavSafely(
@@ -778,6 +909,127 @@ function formatSrtExportError(error: unknown): string {
     "No se pudo exportar el SRT",
     `message: ${message}`,
   ].join("\n");
+}
+
+function renderMogrtProgress(
+  statusLabel: HTMLParagraphElement,
+  elements: ResultElements,
+  progress: MogrtBridgeBatchProgress,
+): void {
+  if (progress.phase === "starting") {
+    statusLabel.textContent = `Estado: creando subtítulos MOGRT (0/${progress.total})`;
+    setCopyFeedback(elements, `Preparando ${progress.total} captionSegment(s)...`, "neutral");
+    return;
+  }
+
+  if (progress.phase === "item_started") {
+    statusLabel.textContent = `Estado: creando subtítulos MOGRT (${progress.current}/${progress.total})`;
+    setCopyFeedback(
+      elements,
+      `Procesando caption ${progress.current}/${progress.total}...`,
+      "neutral",
+    );
+    return;
+  }
+
+  if (progress.phase === "item_completed" && progress.report) {
+    statusLabel.textContent = `Estado: creando subtítulos MOGRT (${progress.current}/${progress.total})`;
+    setCopyFeedback(
+      elements,
+      [
+        `Procesado ${progress.current}/${progress.total}`,
+        formatMogrtItemLine(progress.report),
+      ].join("\n"),
+      isMogrtReportFullyOk(progress.report) ? "neutral" : "warning",
+    );
+    return;
+  }
+
+  if (progress.phase === "completed") {
+    statusLabel.textContent = `Estado: subtítulos MOGRT procesados (${progress.current}/${progress.total})`;
+  }
+}
+
+function formatMogrtBatchStatus(report: MogrtBridgeBatchReport): string {
+  if (report.status === "ok") {
+    return `Estado: MOGRTs creados (${report.totals.successful}/${report.totals.total})`;
+  }
+
+  if (report.status === "partial") {
+    return `Estado: MOGRTs con errores parciales (${report.totals.successful}/${report.totals.total})`;
+  }
+
+  return `Estado: error al crear MOGRTs (${report.totals.successful}/${report.totals.total})`;
+}
+
+function formatMogrtBatchFeedback(report: MogrtBridgeBatchReport): string {
+  const maxVisibleItems = 40;
+  const visibleItems = report.items.slice(0, maxVisibleItems);
+  const hiddenItems = Math.max(0, report.items.length - visibleItems.length);
+  const itemLines = visibleItems.map(formatMogrtItemLine);
+
+  return [
+    report.status === "ok"
+      ? "Subtítulos MOGRT creados"
+      : "Subtítulos MOGRT procesados con errores",
+    `procesados: ${report.totals.processed}/${report.totals.total}`,
+    `ok completos: ${report.totals.successful}`,
+    `fallidos: ${report.totals.failed}`,
+    `insert ok: ${report.totals.insertOk}/${report.totals.total}`,
+    `text ok: ${report.totals.textOk}/${report.totals.total}`,
+    `duration ok: ${report.totals.durationOk}/${report.totals.total}`,
+    report.totals.skipped > 0 ? `omitidos: ${report.totals.skipped}` : "",
+    report.warnings.length > 0 ? `warnings: ${report.warnings.join(" | ")}` : "",
+    itemLines.length > 0 ? "Items:" : "",
+    ...itemLines,
+    hiddenItems > 0 ? `${hiddenItems} item(s) más en consola UXP.` : "",
+    "Detalle completo en consola UXP: [GLIFO] mogrt-bridge:batch-report. Logs host-side en el panel CEP.",
+  ].filter((line) => line.length > 0).join("\n");
+}
+
+function formatMogrtItemLine(report: MogrtBridgeProbeReport): string {
+  const errors = uniqueStrings([
+    report.failureMessage,
+    report.insert.error,
+    report.text.error,
+    report.duration.error,
+    ...report.errors,
+  ]);
+
+  return [
+    `#${report.captionIndex + 1}`,
+    formatTimelineMs(report.target.timelineStartMs),
+    `${Math.round(report.target.durationMs)} ms`,
+    report.skipped ? "omitido" : "",
+    `insert: ${formatMogrtBoolean(report.insert.ok)}`,
+    `text: ${formatMogrtBoolean(report.text.ok)}`,
+    `duration: ${formatMogrtBoolean(report.duration.ok)}`,
+    errors.length > 0 ? `error: ${errors.join(" | ")}` : "",
+  ].filter((line) => line.length > 0).join(" | ");
+}
+
+function isMogrtReportFullyOk(report: MogrtBridgeProbeReport): boolean {
+  return report.insert.ok && report.text.ok && report.duration.ok;
+}
+
+function formatMogrtBoolean(value: boolean): string {
+  return value ? "ok" : "no";
+}
+
+function uniqueStrings(values: Array<string | null>): string[] {
+  const result: string[] = [];
+  values.forEach((value) => {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      return;
+    }
+
+    const normalized = value.trim();
+    if (!result.includes(normalized)) {
+      result.push(normalized);
+    }
+  });
+
+  return result;
 }
 
 function getErrorMessage(error: unknown): string {

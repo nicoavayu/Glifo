@@ -258,6 +258,8 @@ body {
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .panel__copyFeedback[data-tone="success"] {

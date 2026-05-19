@@ -3,6 +3,11 @@ export interface PickedMediaFile {
   nativePath: string;
 }
 
+export interface PickedMogrtFile {
+  name: string;
+  nativePath: string;
+}
+
 type UnknownRecord = Record<string, unknown>;
 type UnknownFn = (...args: unknown[]) => unknown;
 
@@ -19,9 +24,35 @@ const SUPPORTED_MEDIA_TYPES = [
 ];
 
 export async function pickExportedMediaFile(): Promise<PickedMediaFile | null> {
+  return pickLocalFile({
+    types: SUPPORTED_MEDIA_TYPES,
+    unavailableMessage: "UXP require no está disponible para abrir el selector de archivos",
+    fileSystemMessage: "UXP localFileSystem.getFileForOpening no está disponible",
+    pathMessage: "El archivo seleccionado no expone nativePath",
+    fallbackName: "archivo seleccionado",
+  });
+}
+
+export async function pickMogrtFile(): Promise<PickedMogrtFile | null> {
+  return pickLocalFile({
+    types: ["mogrt"],
+    unavailableMessage: "UXP require no está disponible para seleccionar un MOGRT",
+    fileSystemMessage: "UXP localFileSystem.getFileForOpening no está disponible",
+    pathMessage: "El MOGRT seleccionado no expone nativePath",
+    fallbackName: "caption-template.mogrt",
+  });
+}
+
+async function pickLocalFile(input: {
+  types: string[];
+  unavailableMessage: string;
+  fileSystemMessage: string;
+  pathMessage: string;
+  fallbackName: string;
+}): Promise<PickedMediaFile | PickedMogrtFile | null> {
   const requireFn = (globalThis as UnknownRecord).require;
   if (typeof requireFn !== "function") {
-    throw new Error("UXP require no está disponible para abrir el selector de archivos");
+    throw new Error(input.unavailableMessage);
   }
 
   const uxpModule = asRecord((requireFn as UnknownFn)("uxp"));
@@ -30,12 +61,12 @@ export async function pickExportedMediaFile(): Promise<PickedMediaFile | null> {
   const getFileForOpening = asFunction(localFileSystem?.getFileForOpening);
 
   if (!getFileForOpening || !localFileSystem) {
-    throw new Error("UXP localFileSystem.getFileForOpening no está disponible");
+    throw new Error(input.fileSystemMessage);
   }
 
   const selected = await Promise.resolve(
     getFileForOpening.call(localFileSystem, {
-      types: SUPPORTED_MEDIA_TYPES,
+      types: input.types,
       allowMultiple: false,
     }),
   );
@@ -48,13 +79,13 @@ export async function pickExportedMediaFile(): Promise<PickedMediaFile | null> {
 
   const nativePath = await Promise.resolve(fileObject.nativePath);
   if (typeof nativePath !== "string" || nativePath.trim().length === 0) {
-    throw new Error("El archivo seleccionado no expone nativePath");
+    throw new Error(input.pathMessage);
   }
 
   const name =
     typeof fileObject.name === "string" && fileObject.name.trim().length > 0
       ? fileObject.name
-      : nativePath.split(/[\\/]/).pop() ?? "archivo seleccionado";
+      : nativePath.split(/[\\/]/).pop() ?? input.fallbackName;
 
   return {
     name,

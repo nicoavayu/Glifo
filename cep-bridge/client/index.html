@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>GLIFO CEP Bridge</title>
+    <style>
+      html,
+      body {
+        background: #1f1f1f;
+        color: #f2f2f2;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+        height: 100%;
+        margin: 0;
+      }
+
+      main {
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        height: 100%;
+        padding: 14px;
+      }
+
+      h1 {
+        font-size: 16px;
+        font-weight: 650;
+        margin: 0;
+      }
+
+      #status {
+        color: #cfcfcf;
+        margin: 0;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      button {
+        background: #3d73ff;
+        border: 0;
+        border-radius: 4px;
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+        padding: 7px 10px;
+      }
+
+      button.secondary {
+        background: #3d3d3d;
+      }
+
+      pre {
+        background: #111;
+        border: 1px solid #333;
+        border-radius: 4px;
+        box-sizing: border-box;
+        color: #e6e6e6;
+        flex: 1;
+        line-height: 1.4;
+        margin: 0;
+        min-height: 0;
+        overflow: auto;
+        padding: 10px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>GLIFO CEP Bridge</h1>
+      <p id="status">Estado: iniciando...</p>
+      <div class="actions">
+        <button id="startButton" type="button">Start polling</button>
+        <button id="stopButton" class="secondary" type="button">Stop</button>
+      </div>
+      <pre id="log" aria-live="polite"></pre>
+    </main>
+    <script src="./lib/CSInterface.js"></script>
+    <script src="./bridge.js"></script>
+  </body>
+</html>
