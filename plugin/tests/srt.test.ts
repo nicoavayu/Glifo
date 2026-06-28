@@ -5,6 +5,11 @@ import {
   formatSrtTimestamp,
   isSrtExportError,
 } from "../src/services/srt";
+import {
+  createCaptionEditorStateFromTranscript,
+  getCaptionEditorPayload,
+  rebuildCaptionEditorSegments,
+} from "../src/panel/panelController";
 
 describe("buildSrtFromCaptionSegments", () => {
   it("genera SRT desde captionSegments con tiempos relativos", () => {
@@ -31,6 +36,40 @@ describe("buildSrtFromCaptionSegments", () => {
       "estos 15 años que vas a cumplir",
       "",
     ].join("\n"));
+  });
+
+  it("exporta el estado visible recalculado del editor", () => {
+    let state = createCaptionEditorStateFromTranscript({
+      words: [
+        { startMs: 0, endMs: 300, word: "Hola" },
+        { startMs: 350, endMs: 650, word: "Feni." },
+        { startMs: 700, endMs: 1000, word: "Te" },
+        { startMs: 1050, endMs: 1350, word: "deseo" },
+        { startMs: 1400, endMs: 1700, word: "felicidades." },
+      ],
+      captionSegments: [
+        { startMs: 0, endMs: 1700, text: "caption viejo sin reformatear" },
+      ],
+    });
+
+    state = {
+      ...state,
+      settings: {
+        ...state.settings,
+        mode: "word-by-word",
+        maxLines: 1,
+        maxCharsPerLine: 1,
+      },
+    };
+    state = rebuildCaptionEditorSegments(state);
+
+    const srt = buildSrtFromCaptionSegments(
+      getCaptionEditorPayload(state, null).captionSegments,
+    );
+
+    expect(srt).toContain("Hola");
+    expect(srt).toContain("felicidades.");
+    expect(srt).not.toContain("caption viejo sin reformatear");
   });
 
   it("ordena, sanitiza texto y evita overlaps", () => {

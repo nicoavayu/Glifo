@@ -16,6 +16,7 @@ export interface MogrtBridgeProbeInput {
   captionSegments: CaptionSegment[];
   sequenceInMs: number;
   mogrtPath: string;
+  mogrtStyle?: MogrtStyleSettings;
   videoTrackOffset?: number;
   audioTrackOffset?: number;
 }
@@ -40,6 +41,45 @@ export interface MogrtBridgeOperationSummary {
   details: UnknownRecord;
 }
 
+export interface MogrtStyleSettings {
+  fillColor: string;
+  fontSize: number;
+  strokeEnabled: boolean;
+  strokeWidth: number;
+  shadowEnabled: boolean;
+  positionYMode: "bottom" | "center" | "top";
+}
+
+export interface MogrtExposedParameter {
+  index: number | null;
+  displayName: string | null;
+  matchName: string | null;
+  type: unknown;
+  value: unknown;
+  typeofValue: string | null;
+  valueKind: string | null;
+  source: string | null;
+  componentName: string | null;
+  componentIndex: number | null;
+  groups: string[];
+  inferredKind: string;
+  settable: boolean;
+}
+
+export interface MogrtStyleAvailability {
+  text: number;
+  fillColor: number;
+  strokeColor: number;
+  strokeWidth: number;
+  shadow: number;
+  fontSize: number;
+  position: number;
+  scale: number;
+  opacity: number;
+  animation: number;
+  totalStyleParams: number;
+}
+
 export interface MogrtBridgeProbeReport {
   status: MogrtBridgeProbeStatus;
   failureMessage: string | null;
@@ -52,7 +92,10 @@ export interface MogrtBridgeProbeReport {
   insert: MogrtBridgeOperationSummary;
   text: MogrtBridgeOperationSummary;
   duration: MogrtBridgeOperationSummary;
+  style: MogrtBridgeOperationSummary;
   visualDiagnostics: unknown | null;
+  exposedParameters: MogrtExposedParameter[];
+  styleAvailability: MogrtStyleAvailability;
   itemName: string | null;
   startTicks: string | null;
   endTicks: string | null;
@@ -60,6 +103,15 @@ export interface MogrtBridgeProbeReport {
   errors: string[];
   warnings: string[];
 }
+
+export const DEFAULT_MOGRT_STYLE_SETTINGS: MogrtStyleSettings = {
+  fillColor: "#ffffff",
+  fontSize: 96,
+  strokeEnabled: true,
+  strokeWidth: 4,
+  shadowEnabled: true,
+  positionYMode: "bottom",
+};
 
 export interface MogrtBridgeBatchProgress {
   phase: "starting" | "item_started" | "item_completed" | "completed";
@@ -134,6 +186,7 @@ export async function runSingleCaptionMogrtBridgeProbe(
     target: item.target,
     mogrtPath: input.mogrtPath,
     sequenceInMs: input.sequenceInMs,
+    mogrtStyle: input.mogrtStyle,
     videoTrackOffset: input.videoTrackOffset ?? 0,
     audioTrackOffset: input.audioTrackOffset ?? 0,
   });
@@ -192,6 +245,7 @@ export async function runCaptionSegmentsMogrtBridgeFlow(
       target: item.target,
       mogrtPath: input.mogrtPath,
       sequenceInMs: input.sequenceInMs,
+      mogrtStyle: input.mogrtStyle,
       videoTrackOffset: input.videoTrackOffset ?? 0,
       audioTrackOffset: input.audioTrackOffset ?? 0,
     });
@@ -254,7 +308,10 @@ function createInitialReport(
     insert: createOperationSummary(),
     text: createOperationSummary(),
     duration: createOperationSummary(),
+    style: createOperationSummary(),
     visualDiagnostics: null,
+    exposedParameters: [],
+    styleAvailability: createEmptyStyleAvailability(),
     itemName: null,
     startTicks: null,
     endTicks: null,
@@ -278,6 +335,7 @@ async function runCaptionMogrtBridgeJob(input: {
   target: MogrtBridgeProbeTarget;
   mogrtPath: string;
   sequenceInMs: number;
+  mogrtStyle?: MogrtStyleSettings;
   videoTrackOffset: number;
   audioTrackOffset: number;
 }): Promise<MogrtBridgeProbeReport> {
@@ -290,6 +348,7 @@ async function runCaptionMogrtBridgeJob(input: {
       mogrtPath: input.mogrtPath,
       sequenceInMs: input.sequenceInMs,
       captionSegment: input.captionSegment,
+      mogrtStyle: input.mogrtStyle,
       videoTrackOffset: input.videoTrackOffset,
       audioTrackOffset: input.audioTrackOffset,
     });
@@ -482,6 +541,7 @@ async function createBridgeJob(input: {
   mogrtPath: string;
   sequenceInMs: number;
   captionSegment: CaptionSegment;
+  mogrtStyle?: MogrtStyleSettings;
   videoTrackOffset: number;
   audioTrackOffset: number;
 }): Promise<CreatedBridgeJob> {
@@ -592,6 +652,8 @@ function applyBridgeResult(report: MogrtBridgeProbeReport, result: unknown): voi
     resultObject.visual ??
     asRecord(resultObject.diagnostics)?.visualAudit ??
     null;
+  report.exposedParameters = normalizeMogrtParamAudit(report.visualDiagnostics);
+  report.styleAvailability = summarizeStyleAvailability(report.exposedParameters);
   report.warnings.push(...readVisualDiagnosticWarnings(report.visualDiagnostics));
 
   report.insert.ok = resultObject.inserted === true;
@@ -606,6 +668,12 @@ function applyBridgeResult(report: MogrtBridgeProbeReport, result: unknown): voi
 
   applyOperationResult(report.text, resultObject.text, "No se pudo setear el texto del MOGRT.");
   applyOperationResult(report.duration, resultObject.duration, "No se pudo ajustar la duración del MOGRT.");
+  applyOperationResult(report.style, resultObject.style, "No se pudieron aplicar estilos del MOGRT.");
+  if (report.styleAvailability.totalStyleParams === 0) {
+    report.warnings.push(
+      "Este template solo permite editar texto. Para controlar estilo, exponé parámetros en After Effects.",
+    );
+  }
 
   report.status = report.insert.ok ? "ok" : "failed";
   if (!report.insert.ok) {
@@ -710,6 +778,222 @@ function normalizeStringArray(value: unknown): string[] {
 function readVisualDiagnosticWarnings(value: unknown): string[] {
   const warnings = asRecord(value)?.warnings;
   return normalizeStringArray(warnings).map((warning) => `Visual audit: ${warning}`);
+}
+
+function createEmptyStyleAvailability(): MogrtStyleAvailability {
+  return {
+    text: 0,
+    fillColor: 0,
+    strokeColor: 0,
+    strokeWidth: 0,
+    shadow: 0,
+    fontSize: 0,
+    position: 0,
+    scale: 0,
+    opacity: 0,
+    animation: 0,
+    totalStyleParams: 0,
+  };
+}
+
+function normalizeMogrtParamAudit(value: unknown): MogrtExposedParameter[] {
+  const visualObject = asRecord(value);
+  if (!visualObject) {
+    return [];
+  }
+
+  const snapshots: MogrtExposedParameter[] = [];
+  collectParamSnapshots(snapshots, visualObject.availableProperties, "available");
+  collectParamSnapshots(snapshots, visualObject.textParamInventory, "sourceText");
+
+  const groups = asRecord(visualObject.paramGroups);
+  if (groups) {
+    Object.keys(groups).forEach((groupKey) => {
+      collectParamSnapshots(snapshots, groups[groupKey], groupKey);
+    });
+  }
+
+  const deduped: MogrtExposedParameter[] = [];
+  snapshots.forEach((snapshot) => {
+    const existing = deduped.find((candidate) =>
+      candidate.source === snapshot.source &&
+      candidate.componentIndex === snapshot.componentIndex &&
+      candidate.index === snapshot.index &&
+      candidate.displayName === snapshot.displayName
+    );
+
+    if (existing) {
+      snapshot.groups.forEach((group) => {
+        if (!existing.groups.includes(group)) {
+          existing.groups.push(group);
+        }
+      });
+      existing.inferredKind = inferMogrtParamKind(existing);
+      return;
+    }
+
+    deduped.push(snapshot);
+  });
+
+  return deduped;
+}
+
+function collectParamSnapshots(
+  output: MogrtExposedParameter[],
+  value: unknown,
+  fallbackGroup: string,
+): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  value.forEach((item) => {
+    const object = asRecord(item);
+    if (!object) {
+      return;
+    }
+
+    const groups = normalizeStringArray(object.groups);
+    if (!groups.includes(fallbackGroup)) {
+      groups.push(fallbackGroup);
+    }
+
+    const snapshot: MogrtExposedParameter = {
+      index: typeof object.index === "number" ? object.index : null,
+      displayName: typeof object.displayName === "string" ? object.displayName : null,
+      matchName: typeof object.matchName === "string" ? object.matchName : null,
+      type: object.type ?? null,
+      value: object.value ?? null,
+      typeofValue: typeof object.typeofValue === "string" ? object.typeofValue : null,
+      valueKind: typeof object.valueKind === "string" ? object.valueKind : null,
+      source: typeof object.source === "string" ? object.source : null,
+      componentName: typeof object.componentName === "string" ? object.componentName : null,
+      componentIndex: typeof object.componentIndex === "number" ? object.componentIndex : null,
+      groups,
+      inferredKind: "unknown",
+      settable: object.typeofSetValue === "function",
+    };
+    snapshot.inferredKind = inferMogrtParamKind(snapshot);
+    output.push(snapshot);
+  });
+}
+
+function inferMogrtParamKind(param: MogrtExposedParameter): string {
+  const text = normalizeForSearch([
+    param.displayName,
+    param.matchName,
+    String(param.type ?? ""),
+    ...param.groups,
+  ].filter(Boolean).join(" "));
+
+  if (param.groups.includes("sourceText") || text.includes("caption text") || text.includes("source text")) {
+    return "text";
+  }
+
+  if (text.includes("animation") || text.includes("preset")) {
+    return "animation";
+  }
+
+  if (text.includes("shadow") || text.includes("sombra")) {
+    return "shadow";
+  }
+
+  if (text.includes("stroke") || text.includes("trazo")) {
+    return text.includes("width") || text.includes("ancho") ? "strokeWidth" : "strokeColor";
+  }
+
+  if (text.includes("fill") || text.includes("relleno") || text.includes("color")) {
+    return "fillColor";
+  }
+
+  if (text.includes("font size") || text.includes("text size") || text.includes("tamano")) {
+    return "fontSize";
+  }
+
+  if (text.includes("position") || text.includes("posicion")) {
+    return "position";
+  }
+
+  if (text.includes("scale") || text.includes("escala")) {
+    return "scale";
+  }
+
+  if (text.includes("opacity") || text.includes("opacidad") || text.includes("alpha")) {
+    return "opacity";
+  }
+
+  if (param.typeofValue === "boolean") {
+    return "boolean";
+  }
+
+  if (param.typeofValue === "number") {
+    return "number";
+  }
+
+  return "unknown";
+}
+
+function summarizeStyleAvailability(params: MogrtExposedParameter[]): MogrtStyleAvailability {
+  const availability = createEmptyStyleAvailability();
+  params.forEach((param) => {
+    switch (param.inferredKind) {
+      case "text":
+        availability.text += 1;
+        break;
+      case "fillColor":
+        availability.fillColor += 1;
+        break;
+      case "strokeColor":
+        availability.strokeColor += 1;
+        break;
+      case "strokeWidth":
+        availability.strokeWidth += 1;
+        break;
+      case "shadow":
+        availability.shadow += 1;
+        break;
+      case "fontSize":
+        availability.fontSize += 1;
+        break;
+      case "position":
+        availability.position += 1;
+        break;
+      case "scale":
+        availability.scale += 1;
+        break;
+      case "opacity":
+        availability.opacity += 1;
+        break;
+      case "animation":
+        availability.animation += 1;
+        break;
+      default:
+        break;
+    }
+  });
+
+  availability.totalStyleParams =
+    availability.fillColor +
+    availability.strokeColor +
+    availability.strokeWidth +
+    availability.shadow +
+    availability.fontSize +
+    availability.position +
+    availability.scale +
+    availability.opacity +
+    availability.animation;
+  return availability;
+}
+
+function normalizeForSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[áàâä]/g, "a")
+    .replace(/[éèêë]/g, "e")
+    .replace(/[íìîï]/g, "i")
+    .replace(/[óòôö]/g, "o")
+    .replace(/[úùûü]/g, "u")
+    .replace(/ñ/g, "n");
 }
 
 function firstString(values: string[]): string | null {

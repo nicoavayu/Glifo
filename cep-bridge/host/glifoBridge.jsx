@@ -7,6 +7,16 @@
   var MAX_VALUE_CHARS = 6000;
   var MAX_STRUCTURE_DEPTH = 4;
   var DEFAULT_TEMPLATE_TEXT = "Caption text";
+  var DEFAULT_SUBTITLE_POSITION = { x: 960, y: 850 };
+  var POSITION_FRAME_1080P = {
+    minX: 0,
+    maxX: 1920,
+    minY: 0,
+    maxY: 1080,
+    visibleMinY: 700,
+    visibleMaxY: 980
+  };
+  var BAD_POSITION_SENTINEL = 32767;
   var TEXT_FIELD_NAMES = [
     "text",
     "sourceText",
@@ -45,9 +55,39 @@
       keywords: ["scale", "escala", "size", "tamano"]
     },
     {
+      key: "fontSize",
+      label: "font size",
+      keywords: ["font size", "text size", "tamano de fuente", "tamano texto", "size"]
+    },
+    {
+      key: "fillColor",
+      label: "fill color",
+      keywords: ["fill color", "fill", "relleno", "text color", "caption color", "color texto"]
+    },
+    {
+      key: "strokeColor",
+      label: "stroke color",
+      keywords: ["stroke color", "stroke", "trazo color", "color trazo"]
+    },
+    {
+      key: "strokeWidth",
+      label: "stroke width",
+      keywords: ["stroke width", "stroke size", "stroke ancho", "trazo ancho", "ancho trazo"]
+    },
+    {
+      key: "shadow",
+      label: "shadow",
+      keywords: ["shadow", "sombra", "drop shadow"]
+    },
+    {
+      key: "animation",
+      label: "animation / preset",
+      keywords: ["animation", "animacion", "preset", "template"]
+    },
+    {
       key: "colorFill",
-      label: "color / fill",
-      keywords: ["color", "colour", "fill", "relleno", "stroke", "trazo"]
+      label: "legacy color / fill",
+      keywords: ["color", "colour"]
     },
     {
       key: "visibility",
@@ -71,7 +111,8 @@
     timelineEndMs,
     text,
     videoTrackOffset,
-    audioTrackOffset
+    audioTrackOffset,
+    styleJson
   ) {
     var startTicks = msToTicks(timelineStartMs);
     var endTicks = msToTicks(timelineEndMs);
@@ -102,6 +143,15 @@
         ok: false,
         error: null
       },
+      style: {
+        ok: false,
+        status: "not_requested",
+        error: null,
+        applied: [],
+        skipped: [],
+        unavailable: [],
+        controls: []
+      },
       visual: null,
       selectedTextProperty: null,
       textBefore: null,
@@ -113,6 +163,8 @@
       itemName: null,
       startTicks: startTicks,
       endTicks: endTicks,
+      availableProperties: [],
+      mogrtLogs: [],
       diagnostics: null,
       errors: []
     };
@@ -137,11 +189,20 @@
       }
 
       var mgtInspection = inspectMgtComponent(item);
+      var stylePayload = parseStylePayload(styleJson);
+      var availableProperties = inspectAllMogrtProperties(item, mgtInspection);
       result.ok = true;
       result.inserted = true;
       result.itemName = safeString(item.name);
+      result.availableProperties = availableProperties;
+      emitMogrtLog(result.mogrtLogs, "mogrt:available-properties", {
+        count: availableProperties.length,
+        properties: availableProperties
+      });
       result.diagnostics = inspectTrackItem(item, mgtInspection);
-      result.text = trySetMogrtText(item, text, mgtInspection);
+      result.diagnostics.availableProperties = availableProperties;
+      result.text = trySetMogrtText(item, text, mgtInspection, result.mogrtLogs);
+      result.style = tryApplyMogrtStyle(item, mgtInspection, stylePayload, result.mogrtLogs);
       result.selectedTextProperty = result.text.selectedTextProperty;
       result.textBefore = result.text.textBefore;
       result.textAfter = result.text.textAfter;
@@ -149,7 +210,7 @@
       result.textAfterFullDiagnostic = result.text.textAfterFullDiagnostic;
       result.attemptedValueFormats = result.text.attemptedValueFormats;
       result.verificationResult = result.text.verificationResult;
-      result.visual = inspectMogrtVisualAudit(item, mgtInspection, result.text);
+      result.visual = inspectMogrtVisualAudit(item, mgtInspection, result.text, availableProperties, stylePayload);
       result.diagnostics.visualAudit = result.visual;
       result.duration = trySetTrackItemEnd(item, endTicks);
 
@@ -167,7 +228,7 @@
     return jsonStringify(result);
   };
 
-  function trySetMogrtText(item, text, mgtInspection) {
+  function trySetMogrtText(item, text, mgtInspection, logs) {
     var result = {
       ok: false,
       status: "failed",
@@ -193,7 +254,7 @@
       var candidates = collectTextParamCandidates(item, mgtInspection);
       if (candidates.length > 0) {
         for (var i = 0; i < candidates.length; i++) {
-          var candidateResult = applyTextParamCandidate(candidates[i], text);
+          var candidateResult = applyTextParamCandidate(candidates[i], text, logs);
           result.textCandidates.push(candidateResult.summary);
 
           if (candidateResult.ok) {
@@ -249,6 +310,1090 @@
     }
   }
 
+  function parseStylePayload(styleJson) {
+    if (!styleJson) {
+      return null;
+    }
+
+    if (typeof styleJson === "object") {
+      return styleJson;
+    }
+
+    if (typeof styleJson !== "string" || trimString(styleJson).length === 0) {
+      return null;
+    }
+
+    var parsed = parseJsonString(styleJson);
+    if (parsed.ok && parsed.value && typeof parsed.value === "object") {
+      return parsed.value;
+    }
+
+    return null;
+  }
+
+  function emitSetParamLog(logs, payload) {
+    emitMogrtLog(logs, "mogrt:set-param", payload);
+  }
+
+  function emitMogrtLog(logs, eventName, payload) {
+    if (!logs) {
+      return;
+    }
+
+    try {
+      logs.push("[GLIFO] " + eventName + " " + jsonStringify(payload));
+    } catch (error) {
+      logs.push("[GLIFO] " + eventName + " {\"error\":\"" + errorToString(error) + "\"}");
+    }
+  }
+
+  function tryApplyMogrtStyle(item, mgtInspection, stylePayload, logs) {
+    var result = {
+      ok: false,
+      status: "not_requested",
+      error: null,
+      applied: [],
+      skipped: [],
+      unavailable: [],
+      controls: []
+    };
+
+    if (!stylePayload) {
+      result.ok = true;
+      return result;
+    }
+
+    try {
+      var candidates = collectStyleParamCandidates(item, mgtInspection);
+      for (var i = 0; i < candidates.length; i++) {
+        result.controls.push(createStyleCandidateSummary(candidates[i]));
+      }
+
+      if (candidates.length === 0) {
+        result.status = "no_style_params";
+        result.error = "Este MOGRT solo permite editar texto. Para controlar estilo, expone parametros en After Effects.";
+        return result;
+      }
+
+      applyStyleControl(result, candidates, "fillColor", stylePayload.fillColor, logs);
+      applyStyleControl(result, candidates, "fontSize", stylePayload.fontSize, logs);
+      applyStyleControl(result, candidates, "strokeWidth", stylePayload.strokeEnabled ? stylePayload.strokeWidth : 0, logs);
+      applyStyleControl(result, candidates, "shadowEnabled", stylePayload.shadowEnabled, logs);
+      applyMogrtPositionControl(result, candidates, stylePayload.positionYMode, logs);
+
+      result.ok = result.applied.length > 0;
+      result.status = result.ok ? "ok" : "no_matching_style_params";
+      if (!result.ok) {
+        result.error = "No se encontraron parametros de estilo compatibles en este MOGRT.";
+      }
+      return result;
+    } catch (error) {
+      result.status = "failed";
+      result.error = errorToString(error);
+      return result;
+    }
+  }
+
+  function collectStyleParamCandidates(item, mgtInspection) {
+    var candidates = [];
+
+    if (mgtInspection.component) {
+      collectStyleParamCandidatesFromProperties(
+        mgtInspection.component.properties,
+        "getMGTComponent.properties[index]",
+        readParamDisplayName(mgtInspection.component),
+        null,
+        candidates
+      );
+    }
+
+    collectStyleParamCandidatesFromComponents(item.components, candidates);
+    return candidates;
+  }
+
+  function collectStyleParamCandidatesFromComponents(components, candidates) {
+    if (!components) {
+      return;
+    }
+
+    var count = readCollectionCount(components);
+    for (var i = 0; i < count && i < MAX_COMPONENTS; i++) {
+      var component = readCollectionItem(components, i);
+      if (!component || !component.properties) {
+        continue;
+      }
+
+      collectStyleParamCandidatesFromProperties(
+        component.properties,
+        "item.components[" + String(i) + "].properties[index]",
+        readParamDisplayName(component),
+        i,
+        candidates
+      );
+    }
+  }
+
+  function collectStyleParamCandidatesFromProperties(properties, source, componentName, componentIndex, candidates) {
+    if (!properties) {
+      return;
+    }
+
+    var count = readCollectionCount(properties);
+    for (var i = 0; i < count && i < MAX_VISUAL_PARAMS; i++) {
+      var param = readCollectionItem(properties, i);
+      if (!param) {
+        continue;
+      }
+
+      var groupKeys = getVisualParamGroupKeys(param);
+      if (groupKeys.length === 0) {
+        continue;
+      }
+
+      var candidate = {
+        param: param,
+        index: i,
+        displayName: readParamDisplayName(param),
+        matchName: readParamMatchName(param),
+        type: readParamType(param),
+        source: source,
+        componentName: componentName,
+        componentIndex: componentIndex,
+        groups: groupKeys,
+        valueInfo: readParamValueInfo(param)
+      };
+
+      if (!hasStyleParamCandidate(candidates, candidate)) {
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  function hasStyleParamCandidate(candidates, candidate) {
+    for (var i = 0; i < candidates.length; i++) {
+      if (
+        candidates[i].source === candidate.source &&
+        candidates[i].componentIndex === candidate.componentIndex &&
+        candidates[i].index === candidate.index &&
+        candidates[i].displayName === candidate.displayName
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function createStyleCandidateSummary(candidate) {
+    return {
+      index: candidate.index,
+      displayName: candidate.displayName,
+      matchName: candidate.matchName,
+      type: candidate.type,
+      source: candidate.source,
+      componentName: candidate.componentName,
+      componentIndex: candidate.componentIndex,
+      groups: candidate.groups,
+      value: candidate.valueInfo.valueDiagnostic,
+      typeofValue: candidate.valueInfo.typeofValue,
+      valueKind: candidate.valueInfo.valueKind,
+      typeofSetValue: typeof candidate.param.setValue
+    };
+  }
+
+  function applyStyleControl(result, candidates, controlKey, requestedValue, logs) {
+    if (requestedValue === null || requestedValue === undefined || requestedValue === "") {
+      result.skipped.push({ control: controlKey, reason: "empty_value" });
+      return;
+    }
+
+    var candidate = findStyleCandidate(candidates, controlKey);
+    if (!candidate) {
+      result.unavailable.push({ control: controlKey });
+      emitSetParamLog(logs, {
+        kind: "style",
+        control: controlKey,
+        propertyName: controlKey,
+        attemptedValue: requestedValue,
+        success: false,
+        error: "No matching exposed MOGRT property."
+      });
+      return;
+    }
+
+    applyStyleCandidate(result, candidate, controlKey, requestedValue, logs);
+  }
+
+  function applyMogrtPositionControl(result, candidates, positionYMode, logs) {
+    if (positionYMode === null || positionYMode === undefined || positionYMode === "") {
+      result.skipped.push({ control: "positionY", reason: "empty_value" });
+      return;
+    }
+
+    var matches = findStyleCandidates(candidates, "positionY", 8);
+    if (matches.length === 0) {
+      result.unavailable.push({ control: "positionY" });
+      emitMogrtLog(logs, "mogrt:position-before", {
+        control: "positionY",
+        selected: null,
+        candidateCount: 0,
+        before: null
+      });
+      emitMogrtLog(logs, "mogrt:position-set-attempt", {
+        control: "positionY",
+        attemptedValue: null,
+        success: false,
+        error: "No matching exposed MOGRT position property."
+      });
+      emitMogrtLog(logs, "mogrt:position-after", {
+        control: "positionY",
+        selected: null,
+        after: null,
+        success: false,
+        error: "No matching exposed MOGRT position property."
+      });
+      emitSetParamLog(logs, {
+        kind: "style",
+        control: "positionY",
+        propertyName: "positionY",
+        attemptedValue: positionYMode,
+        success: false,
+        error: "No matching exposed MOGRT property."
+      });
+      return;
+    }
+
+    for (var i = 0; i < matches.length; i++) {
+      if (applyMogrtPositionCandidate(result, matches[i], positionYMode, logs, matches.length)) {
+        return;
+      }
+    }
+  }
+
+  function applyMogrtPositionCandidate(result, candidate, positionYMode, logs, candidateCount) {
+    var beforeInfo = readParamValueInfo(candidate.param);
+    var positionValue = buildSafePositionSetValue(candidate, beforeInfo.value, beforeInfo, positionYMode);
+    var beforePayload = createPositionLogPayload(candidate, {
+      control: "positionY",
+      candidateCount: candidateCount,
+      requestedMode: positionYMode,
+      before: beforeInfo.valueDiagnostic,
+      beforeValueKind: beforeInfo.valueKind,
+      beforeGetValueOk: beforeInfo.ok,
+      beforeGetValueError: beforeInfo.error,
+      coordinateSpaceHint: positionValue.coordinateSpaceHint,
+      strategy: positionValue.strategy
+    });
+    emitMogrtLog(logs, "mogrt:position-before", beforePayload);
+
+    if (!positionValue.available) {
+      var skippedEntry = createPositionResultEntry(candidate, positionYMode, null, beforeInfo, beforeInfo, null);
+      skippedEntry.error = positionValue.reason;
+      result.skipped.push(skippedEntry);
+      emitMogrtLog(logs, "mogrt:position-set-attempt", createPositionLogPayload(candidate, {
+        control: "positionY",
+        requestedMode: positionYMode,
+        attemptedValue: null,
+        strategy: positionValue.strategy,
+        success: false,
+        error: positionValue.reason
+      }));
+      emitMogrtLog(logs, "mogrt:position-after", createPositionLogPayload(candidate, {
+        control: "positionY",
+        requestedMode: positionYMode,
+        after: beforeInfo.valueDiagnostic,
+        success: false,
+        error: positionValue.reason
+      }));
+      emitSetParamLog(logs, {
+        kind: "style",
+        control: "positionY",
+        propertyName: candidate.displayName || "positionY",
+        matchName: candidate.matchName,
+        componentName: candidate.componentName,
+        componentIndex: candidate.componentIndex,
+        paramIndex: candidate.index,
+        attemptedValue: null,
+        before: beforeInfo.valueDiagnostic,
+        after: beforeInfo.valueDiagnostic,
+        success: false,
+        error: positionValue.reason
+      });
+      return false;
+    }
+
+    emitMogrtLog(logs, "mogrt:position-set-attempt", createPositionLogPayload(candidate, {
+      control: "positionY",
+      requestedMode: positionYMode,
+      attemptedValue: toDiagnosticValue(positionValue.value, 0, []),
+      pixelTarget: positionValue.pixelTarget,
+      coordinateSpaceHint: positionValue.coordinateSpaceHint,
+      strategy: positionValue.strategy,
+      success: null,
+      error: null
+    }));
+
+    var setResult = applyGenericSetValue(candidate.param, positionValue.value);
+    var afterInfo = readParamValueInfo(candidate.param);
+    var invalidAfter = containsBadPositionSentinel(afterInfo.value);
+    var success = setResult.ok === true && invalidAfter !== true;
+    var error = success
+      ? null
+      : (invalidAfter ? "position_after_invalid_32767" : setResult.error || "setValue failed");
+    var entry = createPositionResultEntry(candidate, positionYMode, positionValue.value, beforeInfo, afterInfo, setResult);
+    entry.strategy = positionValue.strategy;
+    entry.coordinateSpaceHint = positionValue.coordinateSpaceHint;
+    entry.pixelTarget = positionValue.pixelTarget;
+
+    if (success) {
+      result.applied.push(entry);
+    } else {
+      entry.error = error;
+      result.skipped.push(entry);
+    }
+
+    emitMogrtLog(logs, "mogrt:position-after", createPositionLogPayload(candidate, {
+      control: "positionY",
+      requestedMode: positionYMode,
+      attemptedValue: entry.attemptedValue,
+      before: entry.before,
+      after: entry.after,
+      setValue: setResult,
+      success: success,
+      error: error
+    }));
+    emitSetParamLog(logs, {
+      kind: "style",
+      control: "positionY",
+      propertyName: candidate.displayName || "positionY",
+      matchName: candidate.matchName,
+      componentName: candidate.componentName,
+      componentIndex: candidate.componentIndex,
+      paramIndex: candidate.index,
+      attemptedValue: entry.attemptedValue,
+      before: entry.before,
+      after: entry.after,
+      success: success,
+      error: error
+    });
+
+    return success;
+  }
+
+  function createPositionResultEntry(candidate, requestedValue, attemptedValue, beforeInfo, afterInfo, setResult) {
+    return {
+      control: "positionY",
+      displayName: candidate.displayName,
+      matchName: candidate.matchName,
+      type: candidate.type,
+      componentName: candidate.componentName,
+      componentIndex: candidate.componentIndex,
+      paramIndex: candidate.index,
+      requestedValue: requestedValue,
+      attemptedValue: attemptedValue === null ? null : toDiagnosticValue(attemptedValue, 0, []),
+      before: beforeInfo.valueDiagnostic,
+      after: afterInfo.valueDiagnostic,
+      setValue: setResult
+    };
+  }
+
+  function createPositionLogPayload(candidate, payload) {
+    payload.propertyName = candidate.displayName || "positionY";
+    payload.matchName = candidate.matchName;
+    payload.componentName = candidate.componentName;
+    payload.componentIndex = candidate.componentIndex;
+    payload.paramIndex = candidate.index;
+    payload.source = candidate.source;
+    payload.type = candidate.type;
+    return payload;
+  }
+
+  function applyStyleCandidate(result, candidate, controlKey, requestedValue, logs) {
+    var setValue = buildStyleSetValue(candidate, controlKey, requestedValue);
+    if (!setValue.available) {
+      result.skipped.push({
+        control: controlKey,
+        displayName: candidate.displayName,
+        reason: setValue.reason
+      });
+      emitSetParamLog(logs, {
+        kind: "style",
+        control: controlKey,
+        propertyName: candidate.displayName || controlKey,
+        matchName: candidate.matchName,
+        componentName: candidate.componentName,
+        componentIndex: candidate.componentIndex,
+        paramIndex: candidate.index,
+        attemptedValue: requestedValue,
+        success: false,
+        error: setValue.reason
+      });
+      return;
+    }
+
+    var beforeInfo = readParamValueInfo(candidate.param);
+    var setResult = applyGenericSetValue(candidate.param, setValue.value);
+    var afterInfo = readParamValueInfo(candidate.param);
+    var entry = {
+      control: controlKey,
+      displayName: candidate.displayName,
+      matchName: candidate.matchName,
+      type: candidate.type,
+      componentName: candidate.componentName,
+      componentIndex: candidate.componentIndex,
+      paramIndex: candidate.index,
+      requestedValue: requestedValue,
+      attemptedValue: toDiagnosticValue(setValue.value, 0, []),
+      before: beforeInfo.valueDiagnostic,
+      after: afterInfo.valueDiagnostic,
+      setValue: setResult
+    };
+
+    if (setResult.ok) {
+      result.applied.push(entry);
+    } else {
+      entry.error = setResult.error || "setValue failed";
+      result.skipped.push(entry);
+    }
+
+    emitSetParamLog(logs, {
+      kind: "style",
+      control: controlKey,
+      propertyName: candidate.displayName || controlKey,
+      matchName: candidate.matchName,
+      componentName: candidate.componentName,
+      componentIndex: candidate.componentIndex,
+      paramIndex: candidate.index,
+      attemptedValue: entry.attemptedValue,
+      before: entry.before,
+      after: entry.after,
+      success: setResult.ok === true,
+      error: setResult.ok ? null : setResult.error || "setValue failed"
+    });
+  }
+
+  function findStyleCandidate(candidates, controlKey) {
+    var matches = findStyleCandidates(candidates, controlKey, 1);
+    return matches.length > 0 ? matches[0] : null;
+  }
+
+  function findStyleCandidates(candidates, controlKey, limit) {
+    var scored = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var score = scoreStyleCandidate(candidates[i], controlKey);
+      if (score > 0) {
+        scored.push({
+          candidate: candidates[i],
+          score: score
+        });
+      }
+    }
+
+    scored.sort(function (left, right) {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
+      var leftIndex = left.candidate.index === null ? 9999 : left.candidate.index;
+      var rightIndex = right.candidate.index === null ? 9999 : right.candidate.index;
+      return leftIndex - rightIndex;
+    });
+
+    var matches = [];
+    for (var j = 0; j < scored.length && matches.length < limit; j++) {
+      matches.push(scored[j].candidate);
+    }
+
+    return matches;
+  }
+
+  function scoreStyleCandidate(candidate, controlKey) {
+    var name = normalizeParamNameForSearch(
+      safeString(candidate.displayName) + " " + safeString(candidate.matchName) + " " + safeString(candidate.type)
+    );
+    var groups = candidate.groups || [];
+
+    if (controlKey === "fillColor") {
+      if (containsValue(groups, "backgroundMask") || name.indexOf("background") >= 0 || name.indexOf("fondo") >= 0 || name.indexOf("box") >= 0) {
+        return 0;
+      }
+      if (containsValue(groups, "fillColor")) {
+        return 90;
+      }
+      if (containsValue(groups, "colorFill") && name.indexOf("stroke") < 0 && name.indexOf("trazo") < 0 && name.indexOf("shadow") < 0) {
+        return 50;
+      }
+      return 0;
+    }
+
+    if (controlKey === "fontSize") {
+      if (containsValue(groups, "fontSize")) {
+        return 90;
+      }
+      if ((name.indexOf("font") >= 0 || name.indexOf("texto") >= 0) && name.indexOf("size") >= 0) {
+        return 60;
+      }
+      return 0;
+    }
+
+    if (controlKey === "strokeWidth") {
+      if (containsValue(groups, "strokeWidth")) {
+        return 100;
+      }
+      if ((name.indexOf("stroke") >= 0 || name.indexOf("trazo") >= 0) && (name.indexOf("width") >= 0 || name.indexOf("ancho") >= 0 || name.indexOf("size") >= 0)) {
+        return 80;
+      }
+      return 0;
+    }
+
+    if (controlKey === "shadowEnabled") {
+      if (name.indexOf("color") >= 0 || name.indexOf("colour") >= 0) {
+        return 0;
+      }
+      if (containsValue(groups, "shadow")) {
+        return name.indexOf("opacity") >= 0 || name.indexOf("enabled") >= 0 || name.indexOf("on") >= 0 ? 100 : 65;
+      }
+      return 0;
+    }
+
+    if (controlKey === "opacity") {
+      if (containsValue(groups, "opacity")) {
+        return 95;
+      }
+      if (name.indexOf("opacity") >= 0 || name.indexOf("opacidad") >= 0 || name.indexOf("alpha") >= 0) {
+        return 80;
+      }
+      return 0;
+    }
+
+    if (controlKey === "scale") {
+      if (containsValue(groups, "scale")) {
+        return name.indexOf("anchor") >= 0 ? 10 : 95;
+      }
+      if (name.indexOf("scale") >= 0 || name.indexOf("escala") >= 0) {
+        return 80;
+      }
+      return 0;
+    }
+
+    if (controlKey === "position") {
+      if (!containsValue(groups, "position")) {
+        return 0;
+      }
+      if (name.indexOf("anchor") >= 0 || name.indexOf("anclaje") >= 0) {
+        return 15;
+      }
+      if (name.indexOf(" y") >= 0 || name.indexOf("y position") >= 0 || name.indexOf("posicion y") >= 0) {
+        return 95;
+      }
+      if (name.indexOf(" x") >= 0 || name.indexOf("x position") >= 0 || name.indexOf("posicion x") >= 0) {
+        return 95;
+      }
+      return 85;
+    }
+
+    if (controlKey === "positionY") {
+      if (name.indexOf(" x") >= 0 || name.indexOf("x position") >= 0 || name.indexOf("posicion x") >= 0) {
+        return 0;
+      }
+      if (containsValue(groups, "position") && (name.indexOf(" y") >= 0 || name.indexOf("position") >= 0 || name.indexOf("posicion") >= 0)) {
+        return name.indexOf("anchor") >= 0 ? 20 : 85;
+      }
+      return 0;
+    }
+
+    return 0;
+  }
+
+  function buildStyleSetValue(candidate, controlKey, requestedValue) {
+    var currentValue = candidate.valueInfo.value;
+
+    if (controlKey === "fillColor") {
+      var rgb = parseHexColor(requestedValue);
+      if (!rgb) {
+        return { available: false, reason: "invalid_color" };
+      }
+      return { available: true, value: coerceColorValue(currentValue, rgb) };
+    }
+
+    if (controlKey === "fontSize") {
+      return { available: true, value: clampNumber(requestedValue, 1, 500, 96) };
+    }
+
+    if (controlKey === "strokeWidth") {
+      return { available: true, value: clampNumber(requestedValue, 0, 80, 0) };
+    }
+
+    if (controlKey === "shadowEnabled") {
+      return { available: true, value: coerceBooleanLikeValue(currentValue, Boolean(requestedValue)) };
+    }
+
+    if (controlKey === "opacity") {
+      return { available: true, value: coerceOpacityValue(currentValue, requestedValue) };
+    }
+
+    if (controlKey === "scale") {
+      return { available: true, value: coerceScaleValue(currentValue, requestedValue) };
+    }
+
+    if (controlKey === "position") {
+      return { available: true, value: coercePositionValue(currentValue, requestedValue, candidate) };
+    }
+
+    if (controlKey === "positionY") {
+      return { available: true, value: coercePositionYValue(currentValue, requestedValue) };
+    }
+
+    return { available: false, reason: "unknown_control" };
+  }
+
+  function applyGenericSetValue(param, value) {
+    var result = {
+      ok: false,
+      error: null,
+      returnValue: null,
+      returnType: null,
+      returnKind: null
+    };
+
+    if (!param || typeof param.setValue !== "function") {
+      result.error = "El parametro no expone setValue().";
+      return result;
+    }
+
+    var updateUiValues = [true, 1, false, 0];
+    for (var i = 0; i < updateUiValues.length; i++) {
+      try {
+        var returnValue = param.setValue(value, updateUiValues[i]);
+        result.returnValue = toDiagnosticValue(returnValue, 0, []);
+        result.returnType = typeof returnValue;
+        result.returnKind = valueKind(returnValue);
+        if (returnValue !== false) {
+          result.ok = true;
+          result.error = null;
+          return result;
+        }
+      } catch (error) {
+        result.error = errorToString(error);
+      }
+    }
+
+    return result;
+  }
+
+  function parseHexColor(value) {
+    var normalized = trimString(safeString(value)).replace(/^#/, "");
+    if (!/^[0-9a-fA-F]{6}$/.test(normalized)) {
+      return null;
+    }
+
+    return {
+      r: parseInt(normalized.substring(0, 2), 16),
+      g: parseInt(normalized.substring(2, 4), 16),
+      b: parseInt(normalized.substring(4, 6), 16)
+    };
+  }
+
+  function coerceColorValue(currentValue, rgb) {
+    if (isArray(currentValue) && currentValue.length >= 3) {
+      var use255 = false;
+      for (var i = 0; i < currentValue.length; i++) {
+        if (typeof currentValue[i] === "number" && currentValue[i] > 1) {
+          use255 = true;
+        }
+      }
+
+      var converted = currentValue.slice(0);
+      converted[0] = use255 ? rgb.r : rgb.r / 255;
+      converted[1] = use255 ? rgb.g : rgb.g / 255;
+      converted[2] = use255 ? rgb.b : rgb.b / 255;
+      if (converted.length >= 4) {
+        converted[3] = use255 ? 255 : 1;
+      }
+      return converted;
+    }
+
+    return [rgb.r / 255, rgb.g / 255, rgb.b / 255, 1];
+  }
+
+  function coerceBooleanLikeValue(currentValue, enabled) {
+    if (typeof currentValue === "boolean") {
+      return enabled;
+    }
+
+    if (typeof currentValue === "number") {
+      if (currentValue > 1) {
+        return enabled ? 100 : 0;
+      }
+
+      return enabled ? 1 : 0;
+    }
+
+    return enabled ? 1 : 0;
+  }
+
+  function coerceOpacityValue(currentValue, requestedValue) {
+    var numeric = clampNumber(requestedValue, 0, 100, 100);
+    if (typeof currentValue === "number" && currentValue <= 1) {
+      return numeric / 100;
+    }
+
+    if (isArray(currentValue) && currentValue.length >= 4) {
+      var converted = currentValue.slice(0);
+      var use255 = uses255ColorScale(currentValue);
+      converted[3] = use255 ? Math.round((numeric / 100) * 255) : numeric / 100;
+      return converted;
+    }
+
+    return numeric;
+  }
+
+  function coerceScaleValue(currentValue, requestedValue) {
+    var numeric = clampNumber(requestedValue, 1, 500, 100);
+    var scalar = typeof currentValue === "number" && currentValue <= 2 ? numeric / 100 : numeric;
+    if (isArray(currentValue) && currentValue.length >= 2) {
+      var converted = currentValue.slice(0);
+      var useNormalized = Math.abs(Number(currentValue[0])) <= 2 && Math.abs(Number(currentValue[1])) <= 2;
+      converted[0] = useNormalized ? numeric / 100 : numeric;
+      converted[1] = useNormalized ? numeric / 100 : numeric;
+      return converted;
+    }
+
+    return scalar;
+  }
+
+  function buildSafePositionSetValue(candidate, currentValue, beforeInfo, mode) {
+    var target = createSafePositionPixelTarget(mode);
+    var name = normalizeParamNameForSearch(
+      safeString(candidate.displayName) + " " + safeString(candidate.matchName) + " " + safeString(candidate.type)
+    );
+    var explicitY = isExplicitYPositionName(name);
+    var explicitX = isExplicitXPositionName(name);
+    var fullPosition = isFullPositionName(name, explicitX, explicitY);
+
+    if (isArray(currentValue) && currentValue.length >= 2) {
+      var arraySpace = inferPositionArrayCoordinateSpace(currentValue);
+      var arrayTarget = convertPositionPixelTargetToSpace(target, arraySpace);
+      var converted = currentValue.slice(0);
+      converted[0] = arrayTarget.x;
+      converted[1] = arrayTarget.y;
+      return {
+        available: true,
+        value: converted,
+        reason: null,
+        strategy: "array_xy",
+        coordinateSpaceHint: arraySpace,
+        pixelTarget: target
+      };
+    }
+
+    if (typeof currentValue === "number") {
+      if (explicitX) {
+        return {
+          available: false,
+          reason: "position_x_property_not_changed",
+          strategy: "separate_x_skipped",
+          coordinateSpaceHint: inferScalarPositionCoordinateSpace(currentValue),
+          pixelTarget: target
+        };
+      }
+
+      if (explicitY) {
+        var scalarSpace = inferScalarPositionCoordinateSpace(currentValue);
+        return {
+          available: true,
+          value: convertPositionPixelYToSpace(target.y, scalarSpace),
+          reason: null,
+          strategy: "separate_y",
+          coordinateSpaceHint: scalarSpace,
+          pixelTarget: target
+        };
+      }
+
+      return {
+        available: false,
+        reason: "ambiguous_numeric_position_property",
+        strategy: "ambiguous_numeric_skipped",
+        coordinateSpaceHint: inferScalarPositionCoordinateSpace(currentValue),
+        pixelTarget: target
+      };
+    }
+
+    if (currentValue === null || currentValue === undefined || (beforeInfo && beforeInfo.ok !== true)) {
+      if (explicitY) {
+        return {
+          available: true,
+          value: target.y,
+          reason: null,
+          strategy: "separate_y_without_readable_value",
+          coordinateSpaceHint: "pixels_1920x1080",
+          pixelTarget: target
+        };
+      }
+
+      if (fullPosition) {
+        return {
+          available: true,
+          value: [target.x, target.y],
+          reason: null,
+          strategy: "array_xy_without_readable_value",
+          coordinateSpaceHint: "pixels_1920x1080",
+          pixelTarget: target
+        };
+      }
+    }
+
+    return {
+      available: false,
+      reason: "unsupported_position_value_shape",
+      strategy: "unsupported_shape_skipped",
+      coordinateSpaceHint: inferPositionCoordinateSpaceFromValue(currentValue),
+      pixelTarget: target
+    };
+  }
+
+  function createSafePositionPixelTarget(mode) {
+    return {
+      x: sanitizePositionPixelX(DEFAULT_SUBTITLE_POSITION.x),
+      y: sanitizePositionPixelY(positionYForMode(mode))
+    };
+  }
+
+  function sanitizePositionPixelX(value) {
+    var numeric = Number(value);
+    if (!isFinite(numeric) || isBadPositionNumber(numeric)) {
+      numeric = DEFAULT_SUBTITLE_POSITION.x;
+    }
+
+    return Math.round(Math.min(POSITION_FRAME_1080P.maxX, Math.max(POSITION_FRAME_1080P.minX, numeric)));
+  }
+
+  function sanitizePositionPixelY(value) {
+    var numeric = Number(value);
+    if (!isFinite(numeric) || isBadPositionNumber(numeric)) {
+      numeric = DEFAULT_SUBTITLE_POSITION.y;
+    }
+
+    return Math.round(Math.min(POSITION_FRAME_1080P.maxY, Math.max(POSITION_FRAME_1080P.minY, numeric)));
+  }
+
+  function convertPositionPixelTargetToSpace(pixelTarget, coordinateSpace) {
+    return {
+      x: convertPositionPixelXToSpace(pixelTarget.x, coordinateSpace),
+      y: convertPositionPixelYToSpace(pixelTarget.y, coordinateSpace)
+    };
+  }
+
+  function convertPositionPixelXToSpace(x, coordinateSpace) {
+    if (coordinateSpace === "normalized_0_to_1_or_-1_to_1") {
+      return clampNumber(x / POSITION_FRAME_1080P.maxX, 0, 1, 0.5);
+    }
+
+    if (coordinateSpace === "percentage") {
+      return clampNumber((x / POSITION_FRAME_1080P.maxX) * 100, 0, 100, 50);
+    }
+
+    return sanitizePositionPixelX(x);
+  }
+
+  function convertPositionPixelYToSpace(y, coordinateSpace) {
+    if (coordinateSpace === "normalized_0_to_1_or_-1_to_1") {
+      return clampNumber(y / POSITION_FRAME_1080P.maxY, 0, 1, DEFAULT_SUBTITLE_POSITION.y / POSITION_FRAME_1080P.maxY);
+    }
+
+    if (coordinateSpace === "percentage") {
+      return clampNumber((y / POSITION_FRAME_1080P.maxY) * 100, 0, 100, (DEFAULT_SUBTITLE_POSITION.y / POSITION_FRAME_1080P.maxY) * 100);
+    }
+
+    return sanitizePositionPixelY(y);
+  }
+
+  function inferPositionCoordinateSpaceFromValue(value) {
+    if (isArray(value) && value.length >= 2) {
+      return inferPositionArrayCoordinateSpace(value);
+    }
+
+    if (typeof value === "number") {
+      return inferScalarPositionCoordinateSpace(value);
+    }
+
+    return "unsupported_or_unknown";
+  }
+
+  function inferPositionArrayCoordinateSpace(value) {
+    if (!containsBadPositionSentinel(value) && looksLikeNormalizedPosition(value)) {
+      return "normalized_0_to_1_or_-1_to_1";
+    }
+
+    if (!containsBadPositionSentinel(value) && looksLikePercentPosition(value)) {
+      return "percentage";
+    }
+
+    return "pixels_1920x1080";
+  }
+
+  function inferScalarPositionCoordinateSpace(value) {
+    var numeric = Number(value);
+    if (!isFinite(numeric) || isBadPositionNumber(numeric)) {
+      return "pixels_1920x1080";
+    }
+
+    if (Math.abs(numeric) <= 2) {
+      return "normalized_0_to_1_or_-1_to_1";
+    }
+
+    if (Math.abs(numeric) <= 100) {
+      return "percentage";
+    }
+
+    return "pixels_1920x1080";
+  }
+
+  function isExplicitXPositionName(name) {
+    return name.indexOf(" x") >= 0 ||
+      name.indexOf("x position") >= 0 ||
+      name.indexOf("posicion x") >= 0;
+  }
+
+  function isExplicitYPositionName(name) {
+    return name.indexOf(" y") >= 0 ||
+      name.indexOf("y position") >= 0 ||
+      name.indexOf("posicion y") >= 0;
+  }
+
+  function isFullPositionName(name, explicitX, explicitY) {
+    if (explicitX || explicitY) {
+      return false;
+    }
+
+    return name.indexOf("position") >= 0 || name.indexOf("posicion") >= 0;
+  }
+
+  function containsBadPositionSentinel(value) {
+    var numbers = extractNumbersFromValue(value, 0, []);
+    for (var i = 0; i < numbers.length; i++) {
+      if (isBadPositionNumber(numbers[i])) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isBadPositionNumber(value) {
+    var numeric = Number(value);
+    return isFinite(numeric) && Math.abs(numeric - BAD_POSITION_SENTINEL) <= 0.001;
+  }
+
+  function coercePositionValue(currentValue, requestedValue, candidate) {
+    var x = Number(requestedValue && requestedValue.x);
+    var y = Number(requestedValue && requestedValue.y);
+    if (!isFinite(x)) {
+      x = DEFAULT_SUBTITLE_POSITION.x;
+    }
+    if (!isFinite(y)) {
+      y = DEFAULT_SUBTITLE_POSITION.y;
+    }
+    x = sanitizePositionPixelX(x);
+    y = sanitizePositionPixelY(y);
+
+    if (isArray(currentValue) && currentValue.length >= 2) {
+      var converted = currentValue.slice(0);
+      if (looksLikeNormalizedPosition(currentValue)) {
+        converted[0] = convertPositionPixelXToSpace(x, "normalized_0_to_1_or_-1_to_1");
+        converted[1] = convertPositionPixelYToSpace(y, "normalized_0_to_1_or_-1_to_1");
+      } else if (looksLikePercentPosition(currentValue)) {
+        converted[0] = convertPositionPixelXToSpace(x, "percentage");
+        converted[1] = convertPositionPixelYToSpace(y, "percentage");
+      } else {
+        converted[0] = x;
+        converted[1] = y;
+      }
+      return converted;
+    }
+
+    var name = normalizeParamNameForSearch(
+      safeString(candidate.displayName) + " " + safeString(candidate.matchName)
+    );
+    if (name.indexOf(" x") >= 0 || name.indexOf("x position") >= 0 || name.indexOf("posicion x") >= 0) {
+      return x;
+    }
+
+    if (name.indexOf(" y") >= 0 || name.indexOf("y position") >= 0 || name.indexOf("posicion y") >= 0) {
+      return y;
+    }
+
+    if (typeof currentValue === "number" && Math.abs(currentValue) <= 2) {
+      return 0.5;
+    }
+
+    if (typeof currentValue === "number" && Math.abs(currentValue) <= 100) {
+      return 50;
+    }
+
+    return y;
+  }
+
+  function looksLikeNormalizedPosition(value) {
+    return isArray(value) &&
+      value.length >= 2 &&
+      Math.abs(Number(value[0])) <= 2 &&
+      Math.abs(Number(value[1])) <= 2;
+  }
+
+  function looksLikePercentPosition(value) {
+    return isArray(value) &&
+      value.length >= 2 &&
+      Math.abs(Number(value[0])) <= 100 &&
+      Math.abs(Number(value[1])) <= 100;
+  }
+
+  function uses255ColorScale(value) {
+    if (!isArray(value)) {
+      return false;
+    }
+
+    for (var i = 0; i < value.length; i++) {
+      if (typeof value[i] === "number" && value[i] > 1) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function coercePositionYValue(currentValue, mode) {
+    var y = sanitizePositionPixelY(positionYForMode(mode));
+    if (isArray(currentValue) && currentValue.length >= 2) {
+      var converted = currentValue.slice(0);
+      converted[1] = convertPositionPixelYToSpace(y, inferPositionArrayCoordinateSpace(currentValue));
+      return converted;
+    }
+
+    return y;
+  }
+
+  function positionYForMode(mode) {
+    if (mode === "top") {
+      return 220;
+    }
+
+    if (mode === "center") {
+      return 540;
+    }
+
+    return DEFAULT_SUBTITLE_POSITION.y;
+  }
+
+  function clampNumber(value, min, max, fallback) {
+    var numeric = Number(value);
+    if (!isFinite(numeric)) {
+      return fallback;
+    }
+
+    return Math.min(max, Math.max(min, numeric));
+  }
+
   function fillTextResultFromCandidate(result, summary) {
     result.ok = true;
     result.status = "ok";
@@ -282,7 +1427,7 @@
     };
   }
 
-  function applyTextParamCandidate(candidate, text) {
+  function applyTextParamCandidate(candidate, text, logs) {
     var expectedText = String(text);
     var summary = createTextCandidateSummary(candidate);
     var beforeInfo = readParamValueInfo(candidate.param);
@@ -311,7 +1456,7 @@
 
     for (var i = 0; i < attempts.length; i++) {
       var attempt = attempts[i];
-      var attemptResult = applySetValueAttempt(candidate.param, attempt, expectedText);
+      var attemptResult = applySetValueAttempt(candidate.param, attempt, expectedText, summary, logs);
       summary.attempts.push(attemptResult);
 
       if (attemptResult.skipped) {
@@ -354,7 +1499,7 @@
     };
   }
 
-  function applySetValueAttempt(param, attempt, expectedText) {
+  function applySetValueAttempt(param, attempt, expectedText, candidateSummary, logs) {
     var result = {
       method: attempt.method,
       format: attempt.format || null,
@@ -379,6 +1524,18 @@
 
     if (attempt.skipped) {
       result.textVerification = createTextVerification(null, expectedText, "skipped");
+      emitSetParamLog(logs, {
+        kind: "text",
+        propertyName: candidateSummary ? candidateSummary.displayName : "text",
+        matchName: candidateSummary ? candidateSummary.matchName : null,
+        componentName: candidateSummary ? candidateSummary.componentName : null,
+        componentIndex: candidateSummary ? candidateSummary.componentIndex : null,
+        paramIndex: candidateSummary ? candidateSummary.index : null,
+        method: attempt.method,
+        attemptedValue: null,
+        success: false,
+        error: attempt.skipReason || "skipped"
+      });
       return result;
     }
 
@@ -394,6 +1551,18 @@
       setResult.error = "El parametro de texto no expone setValue().";
       result.setValueResult = setResult;
       result.textVerification = createTextVerification(null, expectedText, "setValue_missing");
+      emitSetParamLog(logs, {
+        kind: "text",
+        propertyName: candidateSummary ? candidateSummary.displayName : "text",
+        matchName: candidateSummary ? candidateSummary.matchName : null,
+        componentName: candidateSummary ? candidateSummary.componentName : null,
+        componentIndex: candidateSummary ? candidateSummary.componentIndex : null,
+        paramIndex: candidateSummary ? candidateSummary.index : null,
+        method: attempt.method,
+        attemptedValue: result.attemptedValue,
+        success: false,
+        error: setResult.error
+      });
       return result;
     }
 
@@ -422,6 +1591,25 @@
     result.valueAfterFullDiagnostic = describeFullValueDiagnostic(null, afterInfo, expectedText);
     result.textVerification = createTextVerification(afterInfo, expectedText, setResult.ok ? "checked" : "setValue_failed");
     result.getValueContainsExpected = result.textVerification.containsExpected;
+
+    emitSetParamLog(logs, {
+      kind: "text",
+      propertyName: candidateSummary ? candidateSummary.displayName : "text",
+      matchName: candidateSummary ? candidateSummary.matchName : null,
+      componentName: candidateSummary ? candidateSummary.componentName : null,
+      componentIndex: candidateSummary ? candidateSummary.componentIndex : null,
+      paramIndex: candidateSummary ? candidateSummary.index : null,
+      method: attempt.method,
+      attemptedValue: result.attemptedValue,
+      before: null,
+      after: result.valueAfter,
+      success: setResult.ok === true && result.getValueContainsExpected === true,
+      setValueOk: setResult.ok,
+      verified: result.getValueContainsExpected,
+      error: setResult.ok
+        ? (result.getValueContainsExpected ? null : "setValue returned but getValue did not verify expected text")
+        : setResult.error || "setValue failed"
+    });
 
     return result;
   }
@@ -504,7 +1692,7 @@
       return;
     }
 
-    var preferredNames = ["Caption Text", "Source Text", "Text"];
+    var preferredNames = ["Caption Text", "Source Text", "Text", "Texto", "Subtitle", "Subtitles", "Subtitulo", "Content", "Message"];
     var i;
     var param;
 
@@ -1681,17 +2869,22 @@
     };
   }
 
-  function inspectMogrtVisualAudit(item, mgtInspection, textResult) {
+  function inspectMogrtVisualAudit(item, mgtInspection, textResult, availableProperties, stylePayload) {
     var visualGroups = inspectVisualParamGroups(item, mgtInspection);
     var textInventory = inspectTextParamInventory(item, mgtInspection);
     var warnings = createVisualAuditWarnings(visualGroups, textInventory, textResult);
 
     return {
       note: "This is a parameter audit only. It verifies exposed MOGRT controls, not final Program Monitor pixels.",
+      diagnosticMode: false,
+      diagnosticExpectation: null,
+      expressionInspection: "Premiere scripting does not expose After Effects expressions in this bridge; expression overrides must be checked in the AE template.",
+      resolutionAssumption: "Position risk checks assume 1920x1080 unless exposed values look normalized or percentage-based.",
       selectedTextProperty: textResult ? textResult.selectedTextProperty : null,
       selectedTextValueAfter: textResult ? textResult.textAfter : null,
       selectedTextVerification: textResult ? textResult.textVerification : null,
       selectedTextCandidateCount: textResult && textResult.textCandidates ? textResult.textCandidates.length : 0,
+      availableProperties: availableProperties || [],
       textParamInventory: textInventory,
       paramGroups: visualGroups,
       warnings: warnings
@@ -1714,6 +2907,83 @@
     }
 
     return inventory;
+  }
+
+  function inspectAllMogrtProperties(item, mgtInspection) {
+    var properties = [];
+
+    if (mgtInspection.component) {
+      collectAllMogrtPropertiesFromProperties(
+        mgtInspection.component.properties,
+        "getMGTComponent.properties[index]",
+        readParamDisplayName(mgtInspection.component),
+        null,
+        properties
+      );
+    }
+
+    collectAllMogrtPropertiesFromComponents(item.components, properties);
+    return properties;
+  }
+
+  function collectAllMogrtPropertiesFromComponents(components, output) {
+    if (!components) {
+      return;
+    }
+
+    var count = readCollectionCount(components);
+    for (var i = 0; i < count && i < MAX_COMPONENTS; i++) {
+      var component = readCollectionItem(components, i);
+      if (!component || !component.properties) {
+        continue;
+      }
+
+      collectAllMogrtPropertiesFromProperties(
+        component.properties,
+        "item.components[" + String(i) + "].properties[index]",
+        readParamDisplayName(component),
+        i,
+        output
+      );
+    }
+  }
+
+  function collectAllMogrtPropertiesFromProperties(properties, source, componentName, componentIndex, output) {
+    if (!properties) {
+      return;
+    }
+
+    var count = readCollectionCount(properties);
+    for (var i = 0; i < count && i < MAX_VISUAL_PARAMS; i++) {
+      var param = readCollectionItem(properties, i);
+      if (!param) {
+        continue;
+      }
+
+      addAvailablePropertySnapshot(output, inspectParamSnapshot(
+        param,
+        source,
+        componentName,
+        componentIndex,
+        i,
+        getVisualParamGroupKeys(param)
+      ));
+    }
+  }
+
+  function addAvailablePropertySnapshot(output, snapshot) {
+    for (var i = 0; i < output.length; i++) {
+      if (
+        output[i].source === snapshot.source &&
+        output[i].componentIndex === snapshot.componentIndex &&
+        output[i].index === snapshot.index &&
+        output[i].displayName === snapshot.displayName
+      ) {
+        return;
+      }
+    }
+
+    output.push(snapshot);
   }
 
   function inspectVisualParamGroups(item, mgtInspection) {
@@ -1812,16 +3082,22 @@
 
   function inspectParamSnapshot(param, source, componentName, componentIndex, paramIndex, groupKeys) {
     var valueInfo = readParamValueInfo(param);
+    var displayName = readParamDisplayName(param);
+    var matchName = readParamMatchName(param);
+    var type = readParamType(param);
     var snapshot = {
+      name: displayName || matchName || "(unnamed)",
+      propertyName: displayName || matchName || "(unnamed)",
       index: paramIndex,
-      displayName: readParamDisplayName(param),
-      matchName: readParamMatchName(param),
-      type: readParamType(param),
+      displayName: displayName,
+      matchName: matchName,
+      type: type,
       source: source,
       componentName: componentName,
       componentIndex: componentIndex,
       groups: groupKeys,
       value: valueInfo.valueDiagnostic,
+      currentValue: valueInfo.valueDiagnostic,
       typeofValue: valueInfo.typeofValue,
       valueKind: valueInfo.valueKind,
       getValueAvailable: valueInfo.available,
@@ -1830,6 +3106,7 @@
       typeofSetValue: typeof param.setValue,
       keys: collectKeys(param, 20),
       reflectProperties: collectReflectProperties(param, 20),
+      coordinateSpaceHint: inferCoordinateSpaceHint(groupKeys, valueInfo.value),
       risks: []
     };
 
@@ -1880,7 +3157,10 @@
       risks.push("position_may_be_outside_1920x1080_frame");
     }
 
-    if (containsValue(groups, "colorFill") && looksLikeBlackColor(numbers, name)) {
+    if (
+      (containsValue(groups, "colorFill") || containsValue(groups, "fillColor") || containsValue(groups, "strokeColor")) &&
+      looksLikeBlackColor(numbers, name)
+    ) {
       risks.push("fill_or_color_may_be_black");
     }
 
@@ -1889,6 +3169,36 @@
     }
 
     return risks;
+  }
+
+  function inferCoordinateSpaceHint(groups, value) {
+    groups = groups || [];
+    var numbers = extractNumbersFromValue(value, 0, []);
+    if (numbers.length === 0) {
+      return null;
+    }
+
+    if (containsValue(groups, "position")) {
+      if (numbers.length >= 2 && Math.abs(numbers[0]) <= 2 && Math.abs(numbers[1]) <= 2) {
+        return "normalized_0_to_1_or_-1_to_1";
+      }
+
+      if (numbers.length >= 2 && Math.abs(numbers[0]) <= 100 && Math.abs(numbers[1]) <= 100) {
+        return "percentage";
+      }
+
+      return "pixels_or_sequence_space";
+    }
+
+    if (containsValue(groups, "scale")) {
+      if (Math.abs(numbers[0]) <= 2) {
+        return "normalized_scale";
+      }
+
+      return "percent_scale";
+    }
+
+    return null;
   }
 
   function createVisualAuditWarnings(groups, textInventory, textResult) {
@@ -1908,6 +3218,10 @@
       );
     }
 
+    if (groups.backgroundMask.length > 0) {
+      warnings.push("Background/mask-like parameters are exposed; check whether a shape layer is above or covering the text in the template.");
+    }
+
     if (groups.opacity.length === 0) {
       warnings.push("No exposed opacity parameter found; check layer opacity in After Effects if Program Monitor is black.");
     }
@@ -1915,6 +3229,11 @@
     addGroupRiskWarnings(warnings, groups.opacity, "Opacity/alpha risk");
     addGroupRiskWarnings(warnings, groups.position, "Position risk");
     addGroupRiskWarnings(warnings, groups.scale, "Scale risk");
+    addGroupRiskWarnings(warnings, groups.fillColor, "Fill color risk");
+    addGroupRiskWarnings(warnings, groups.strokeColor, "Stroke color risk");
+    addGroupRiskWarnings(warnings, groups.strokeWidth, "Stroke width risk");
+    addGroupRiskWarnings(warnings, groups.shadow, "Shadow risk");
+    addGroupRiskWarnings(warnings, groups.fontSize, "Font size risk");
     addGroupRiskWarnings(warnings, groups.colorFill, "Color/fill risk");
     addGroupRiskWarnings(warnings, groups.visibility, "Visibility/enabled risk");
     addGroupRiskWarnings(warnings, groups.backgroundMask, "Background/mask risk");

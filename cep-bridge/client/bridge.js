@@ -110,12 +110,15 @@
         String(toTrackOffset(job.videoTrackOffset)),
         ",",
         String(toTrackOffset(job.audioTrackOffset)),
+        ",",
+        quoteJsxString(JSON.stringify(job.mogrtStyle || null)),
         ")",
       ].join("");
 
       log("eval:start " + job.id + " @" + timelineStartMs + "ms");
       var rawResult = await evalScript(script);
       result = parseEvalResult(rawResult);
+      logHostDiagnostics(result);
       log("eval:done " + job.id + " inserted=" + Boolean(result.inserted));
     } catch (error) {
       result = {
@@ -177,6 +180,23 @@
 
     if (!response.ok) {
       throw new Error("No se pudo postear resultado del job " + jobId + " (HTTP " + response.status + ")");
+    }
+  }
+
+  function logHostDiagnostics(result) {
+    var lines = result && result.mogrtLogs;
+    if (Array.isArray(lines)) {
+      for (var i = 0; i < lines.length; i++) {
+        log(String(lines[i]));
+      }
+      return;
+    }
+
+    if (result && Array.isArray(result.availableProperties)) {
+      log("[GLIFO] mogrt:available-properties " + JSON.stringify({
+        count: result.availableProperties.length,
+        properties: result.availableProperties
+      }));
     }
   }
 

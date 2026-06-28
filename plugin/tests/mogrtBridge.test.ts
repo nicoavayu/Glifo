@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCaptionSegmentsMogrtBridgeFlow } from "../src/services/mogrtBridge";
+import {
+  createCaptionEditorStateFromTranscript,
+  getCaptionEditorPayload,
+  rebuildCaptionEditorSegments,
+} from "../src/panel/panelController";
 
 describe("runCaptionSegmentsMogrtBridgeFlow", () => {
   beforeEach(() => {
@@ -21,8 +26,12 @@ describe("runCaptionSegmentsMogrtBridgeFlow", () => {
         const body = JSON.parse(String(init.body)) as {
           id: string;
           captionSegment: { text: string };
+          mogrtStyle?: { fillColor?: string };
         };
         calls.push(`post:${body.captionSegment.text}`);
+        expect(body.mogrtStyle).toMatchObject({
+          fillColor: "#ffffff",
+        });
         return jsonResponse({
           job: {
             id: body.id,
@@ -50,6 +59,14 @@ describe("runCaptionSegmentsMogrtBridgeFlow", () => {
         { startMs: 0, endMs: 500, text: "uno" },
         { startMs: 700, endMs: 1200, text: "dos" },
       ],
+      mogrtStyle: {
+        fillColor: "#ffffff",
+        fontSize: 96,
+        strokeEnabled: true,
+        strokeWidth: 4,
+        shadowEnabled: true,
+        positionYMode: "bottom",
+      },
     });
 
     expect(calls).toEqual(["post:uno", "result", "post:dos", "result"]);
@@ -72,6 +89,14 @@ describe("runCaptionSegmentsMogrtBridgeFlow", () => {
       timelineStartMs: 1700,
       durationMs: 500,
       text: "dos",
+    });
+    expect(report.items[0].styleAvailability).toMatchObject({
+      fillColor: 1,
+      totalStyleParams: 1,
+    });
+    expect(report.items[0].exposedParameters[0]).toMatchObject({
+      displayName: "Fill Color",
+      inferredKind: "fillColor",
     });
   });
 
@@ -130,6 +155,69 @@ describe("runCaptionSegmentsMogrtBridgeFlow", () => {
     });
     expect(report.items[1].text.ok).toBe(true);
   });
+
+  it("crea MOGRTs usando captionSegments recalculados desde el editor", async () => {
+    const postedTexts: string[] = [];
+
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (init?.method === "POST" && href.endsWith("/bridge/mogrt-jobs")) {
+        const body = JSON.parse(String(init.body)) as {
+          id: string;
+          captionSegment: { text: string };
+        };
+        postedTexts.push(body.captionSegment.text);
+        return jsonResponse({
+          job: {
+            id: body.id,
+            createdAt: "2026-05-19T14:00:00.000Z",
+            videoTrackOffset: 0,
+            audioTrackOffset: 0,
+          },
+        }, 202);
+      }
+
+      if (href.includes("/bridge/mogrt-jobs/") && href.endsWith("/result")) {
+        return jsonResponse({
+          result: createBridgeResult({ textOk: true, durationOk: true }),
+        });
+      }
+
+      throw new Error(`Unexpected fetch call: ${href}`);
+    }));
+
+    let state = createCaptionEditorStateFromTranscript({
+      words: [
+        { startMs: 0, endMs: 300, word: "Hola" },
+        { startMs: 350, endMs: 650, word: "Feni." },
+        { startMs: 700, endMs: 1000, word: "Te" },
+        { startMs: 1050, endMs: 1350, word: "deseo" },
+      ],
+      captionSegments: [
+        { startMs: 0, endMs: 1350, text: "caption viejo sin reformatear" },
+      ],
+    });
+
+    state = {
+      ...state,
+      settings: {
+        ...state.settings,
+        mode: "word-by-word",
+        maxLines: 1,
+        maxCharsPerLine: 1,
+      },
+    };
+    state = rebuildCaptionEditorSegments(state);
+
+    await runCaptionSegmentsMogrtBridgeFlow({
+      mogrtPath: "/tmp/template.mogrt",
+      sequenceInMs: 1000,
+      captionSegments: getCaptionEditorPayload(state, 1000).captionSegments,
+    });
+
+    expect(postedTexts).toEqual(["Hola", "Feni.", "Te", "deseo"]);
+    expect(postedTexts).not.toContain("caption viejo sin reformatear");
+  });
 });
 
 function createBridgeResult(input: {
@@ -149,6 +237,33 @@ function createBridgeResult(input: {
     startTicks: "1",
     endTicks: "2",
     errors: [],
+    style: {
+      ok: true,
+      status: "ok",
+      applied: [{ control: "fillColor" }],
+    },
+    visual: {
+      paramGroups: {
+        fillColor: [
+          {
+            index: 1,
+            displayName: "Fill Color",
+            matchName: "ADBE Color Control",
+            type: "color",
+            source: "getMGTComponent.properties[index]",
+            componentName: "GLIFO",
+            componentIndex: 0,
+            groups: ["fillColor"],
+            value: [1, 1, 1, 1],
+            typeofValue: "object",
+            valueKind: "[object Array]",
+            typeofSetValue: "function",
+          },
+        ],
+      },
+      textParamInventory: [],
+      warnings: [],
+    },
   };
 }
 
