@@ -6,3 +6,6 @@ Img/
 
 # Local export presets
 plugin/presets/*.epr
+
+# Local backups
+_backups/
