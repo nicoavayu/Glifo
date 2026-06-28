@@ -84,6 +84,23 @@ npm run test --workspace plugin
 
 `Transcribir selección` queda reservado para Fase 2.
 
+## MOGRT recomendado para controles de estilo
+
+GLIFO puede crear MOGRTs editando texto y auditar parámetros expuestos por el template. Para controlar estilo desde el panel, el MOGRT exportado desde After Effects debe exponer estos controles en Essential Graphics:
+
+- `Caption Text`
+- `Font Size`
+- `Fill Color`
+- `Stroke Color`
+- `Stroke Width`
+- `Shadow Opacity` o `Shadow Enabled`
+- `Position Y`
+- `Scale`
+
+Si el MOGRT no expone parámetros de estilo, GLIFO mantiene el flujo actual de texto/duración y muestra el diagnóstico: “Este MOGRT solo permite editar texto. Para controlar estilo, exponé parámetros en After Effects.”
+
+Los presets de animación todavía no se aplican desde GLIFO; el bridge solo deja auditado si el template expone algún parámetro que parezca `Animation` o `Preset`.
+
 ## Errores normalizados
 
 - `media_path_missing`

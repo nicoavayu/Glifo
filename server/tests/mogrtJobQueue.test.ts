@@ -22,6 +22,10 @@ describe("mogrtJobQueue", () => {
         endMs: 3500,
         text: "Hola Feli te deseo muchas felicidades",
       },
+      mogrtStyle: {
+        fillColor: "#ffffff",
+        fontSize: 96,
+      },
       videoTrackOffset: 1,
       audioTrackOffset: 0,
     });
@@ -31,6 +35,10 @@ describe("mogrtJobQueue", () => {
       id: "job-1",
       status: "queued",
       sequenceInMs: 187721,
+      mogrtStyle: {
+        fillColor: "#ffffff",
+        fontSize: 96,
+      },
       videoTrackOffset: 1,
       audioTrackOffset: 0,
     });
@@ -39,6 +47,10 @@ describe("mogrtJobQueue", () => {
     expect(claimed).toMatchObject({
       id: "job-1",
       status: "claimed",
+      mogrtStyle: {
+        fillColor: "#ffffff",
+        fontSize: 96,
+      },
     });
     expect(claimed?.claimedAt).toEqual(expect.any(String));
   });

@@ -13,6 +13,7 @@ export interface MogrtBridgeJob {
   mogrtPath: string;
   sequenceInMs: number;
   captionSegment: MogrtBridgeCaptionSegment;
+  mogrtStyle: Record<string, unknown> | null;
   videoTrackOffset: number;
   audioTrackOffset: number;
   status: MogrtBridgeJobStatus;
@@ -70,12 +71,14 @@ export function createMogrtBridgeJob(input: unknown): CreateMogrtBridgeJobResult
 
   const videoTrackOffset = normalizeTrackOffset(body.videoTrackOffset);
   const audioTrackOffset = normalizeTrackOffset(body.audioTrackOffset);
+  const mogrtStyle = normalizeOptionalRecord(body.mogrtStyle);
 
   const job: MogrtBridgeJob = {
     id,
     mogrtPath,
     sequenceInMs: Math.round(sequenceInMs),
     captionSegment,
+    mogrtStyle,
     videoTrackOffset,
     audioTrackOffset,
     status: "queued",
@@ -171,6 +174,15 @@ function normalizeTrackOffset(value: unknown): number {
   }
 
   return Math.floor(value);
+}
+
+function normalizeOptionalRecord(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  return { ...record };
 }
 
 function normalizeNonNegativeNumber(value: unknown): number | null {
